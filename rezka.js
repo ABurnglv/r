@@ -21,7 +21,7 @@
      * ==================================================== */
     var manifest = {
         type: 'video',
-        version: '1.0.17',
+        version: '1.0.18',
         name: 'HDREZKA',
         description: 'Просмотр фильмов и сериалов с HDREZKA по личному аккаунту',
         component: 'rezka_online'
@@ -516,8 +516,17 @@
                     var d = document.createElement('div');
                     d.innerHTML = tm[0];
                     d.querySelectorAll('.b-translator__item').forEach(function (li) {
+                        // Имя с флагом языка (если есть <img title="Украинский">) —
+                        // иначе "Дубляж" и "Дубляж (Укр)" неотличимы в плейлисте.
+                        var baseName = (li.getAttribute('title') || li.textContent || '').trim();
+                        var langs = [];
+                        li.querySelectorAll('img').forEach(function (img) {
+                            var l = (img.getAttribute('title') || img.getAttribute('alt') || '').trim();
+                            if (l && baseName.indexOf(l) === -1) langs.push(l);
+                        });
+                        var name = langs.length ? (baseName + ' (' + langs.join(', ') + ')') : baseName;
                         info.voice.push({
-                            name: (li.getAttribute('title') || li.textContent || '').trim(),
+                            name: name,
                             id: li.getAttribute('data-translator_id') || defVoiceId,
                             is_camrip:   li.getAttribute('data-camrip')   || camrip,
                             is_ads:      li.getAttribute('data-ads')      || ads,
@@ -545,8 +554,14 @@
                                     // нужен именно второй числовой аргумент — первый это ID фильма,
                                     // и если взять его для всех озвучек, все получат одинаковый поток.
                                     var oc = a.getAttribute('onclick') || a.getAttribute('data-onclick') || '';
+                                    // Возможные вызовы: initCDNMoviesEvents(film_id, tid, ...) или
+                                    // sof.tv.reloadMovieTranslation(this, tid, ...) — во втором случае tid идёт первым числом.
                                     var im = oc.match(/initCDN[A-Za-z]+Events\(\s*\d+\s*,\s*(\d+)/);
                                     if (im) id = im[1];
+                                    if (!id) {
+                                        var im2 = oc.match(/reload(?:Movie|Series)Translation\([^,]*,\s*(\d+)/);
+                                        if (im2) id = im2[1];
+                                    }
                                     // fallback — второе числовое вхождение (id фильма + id перевода)
                                     if (!id) {
                                         var nums = oc.match(/\d{2,}/g);
@@ -638,6 +653,7 @@
                    '&favs=' + encodeURIComponent(info.favs || '') +
                    '&action=get_movie';
         }
+        console.log('REZKA', 'getStream POST voice=', voice && voice.name, 'tid=', voice && voice.id, 'film_id=', info.film_id, 's=', season && season.id, 'e=', episode && episode.episode_id);
 
         // Используем общий request() helper — он умеет network.native (Android, обходит CORS,
         // подставляет ручные cookies). XMLHttpRequest напрямую не работает: CORS блокирует
@@ -694,7 +710,7 @@
                         if (best) picked = best;
                     }
                 }
-                console.log('REZKA', 'getStream picked', picked && picked.label, 'pref=', qPref, 'available=', Object.keys(qualities).join('/'));
+                console.log('REZKA', 'getStream picked', picked && picked.label, 'pref=', qPref, 'available=', Object.keys(qualities).join('/'), 'voice=', voice && voice.name, 'tid=', voice && voice.id, 'urlHash=', (picked.file || '').slice(-40));
                 // Сообщаем в компонент (если подписан) — он перестроит sort-меню
                 try { Lampa.Listener.send('rezka_quality', { type: 'available', labels: sortedItems.map(function(i){return i.label;}) }); } catch(e) {}
                 cb({
@@ -810,6 +826,15 @@
             scroll.append(html);
         }
 
+        // Синхронизируем выбор качества из нашего меню «Качество» с Lampa.Player'ом.
+        // Lampa плеер выбирает уровень по Storage.video_quality_default (число: 480/720/1080/1440/2160).
+        // Перед запуском выставляем его в соответствии с выбором. 'auto' = лучшее (4096).
+        function applyQualityToPlayer() {
+            var qPref = Lampa.Storage.get(STORAGE.quality, 'auto');
+            var n = qPref === 'auto' ? 4096 : (parseInt(qPref, 10) || 0);
+            if (n) try { Lampa.Storage.set('video_quality_default', n); } catch (e) {}
+        }
+
         // ====================================================================
         // playFilm: для фильма строит playlist из ВСЕХ озвучек.
         // Первая воспроизводимая = выбранная по умолчанию (defIdx).
@@ -839,6 +864,7 @@
             getStream(info, info.voice[defIdx], null, null,
                 function (firstData) {
                     Lampa.Modal.close();
+                    applyQualityToPlayer();
                     // Строим playlist: одна запись на каждую озвучку
                     var playlist = info.voice.map(function (v, i) {
                         var cell = {
@@ -909,6 +935,7 @@
             getStream(info, voice, season, firstEp,
                 function (firstData) {
                     Lampa.Modal.close();
+                    applyQualityToPlayer();
                     var playlist = items.map(function (ep, i) {
                         var sNum = parseInt(ep.season_id || season.id, 10) || 0;
                         var eNum = parseInt(ep.episode_id || ep.name, 10) || 0;
@@ -1159,6 +1186,11 @@
                 }));
             try { filter.set('sort', qualityItems); } catch (e) {}
             try { filter.chosen('sort', [qLabel]); } catch (e) {}
+            // Переименование «Сортировать» → «Качество» (только в нашем компоненте)
+            try {
+                var $sortBtn = files.render().find('.filter--sort > span').first();
+                if ($sortBtn.length && $sortBtn.text() !== 'Качество') $sortBtn.text('Качество');
+            } catch (e) {}
 
             // Левый блок (filter) = Перевод (+Сезон для сериала)
             var select = [];
