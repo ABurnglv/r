@@ -21,7 +21,7 @@
      * ==================================================== */
     var manifest = {
         type: 'video',
-        version: '1.0.18',
+        version: '1.0.19',
         name: 'HDREZKA',
         description: 'Просмотр фильмов и сериалов с HDREZKA по личному аккаунту',
         component: 'rezka_online'
@@ -510,8 +510,22 @@
                 if (!fm) fm = str.match(/data-favs="([^"]+)"/);
                 if (fm) info.favs = fm[1];
 
+                // Диагностика: логируем сырой HTML блока переводов — видно будет в консоли Lampa
+                try {
+                    var dbgM = str.match(/<h2>В переводе<\/h2>:[\s\S]{0,3000}?<\/td>/);
+                    if (dbgM) console.log('REZKA', 'translators block (В переводе):', dbgM[0].slice(0, 2500));
+                    var dbgU = str.match(/<ul[^>]+(?:translators-list|b-translators?__list)[\s\S]{0,4000}?<\/ul>/);
+                    if (dbgU) console.log('REZKA', 'translators block (ul):', dbgU[0].slice(0, 2500));
+                    if (!dbgM && !dbgU) console.log('REZKA', 'translators block: НЕ НАЙДЕН');
+                } catch (e) {}
+
                 // translators block
-                var tm = str.match(/<ul[^>]+class="b-translator__list"[\s\S]*?<\/ul>/);
+                // Исправлено: принимаем ОБА варианта класса:
+                //   - b-translator__list  (одиночный translator) — сериалы
+                //   - b-translators__list (translatorS) — фильмы на rezka.ag/.fi
+                // Также ищем по id="translators-list" как fallback.
+                var tm = str.match(/<ul[^>]+class="b-translators?__list"[\s\S]*?<\/ul>/);
+                if (!tm) tm = str.match(/<ul[^>]+id="translators-list"[\s\S]*?<\/ul>/);
                 if (tm) {
                     var d = document.createElement('div');
                     d.innerHTML = tm[0];
@@ -576,15 +590,20 @@
                                 });
                             });
                         }
-                        // 2) fallback — разобрать текстом через запятую
+                        // 2) fallback — только текст в виде "Дубляж, RS, НТВ, Украинский дубляж ..."
+                        // В этом случае из страницы НЕТ реальных translator_id — rezka даёт только один
+                        // вызов initCDN(...) с дефолтным id. Показывать все имена как отдельные озвучки — обман:
+                        // все будут играть ode и тот же поток (id же один). Поэтому делаем ОДНУ озвучку
+                        // с дефолтным id, а в имени укажем все доступные (без «Оригинал» и субтитры).
                         if (!info.voice.length) {
-                            var raw = (dd.textContent || '').trim();
-                            raw.split(/,\s*/).forEach(function (n) {
-                                n = n.trim().replace(/\s*\(\+субтитры\)\s*$/i, '');
-                                if (n) info.voice.push({
-                                    name: n, id: defVoiceId,
-                                    is_camrip: camrip, is_ads: ads, is_director: director
-                                });
+                            var raw = (dd.textContent || '').trim().replace(/\s*\(\+субтитры\)\s*$/i, '');
+                            // Выбираем «лучшее» имя для отображения: Первое имя из списка (обычно Дубляж)
+                            var firstName = raw.split(/[,и] /)[0].trim() || 'Стандартная';
+                            console.log('REZKA', 'voice fallback (no per-translator id on page) — single voice with id=' + defVoiceId, ', дефолтное имя:', firstName);
+                            info.voice.push({
+                                name: firstName,
+                                id: defVoiceId,
+                                is_camrip: camrip, is_ads: ads, is_director: director
                             });
                         }
                     }
@@ -826,13 +845,32 @@
             scroll.append(html);
         }
 
-        // Синхронизируем выбор качества из нашего меню «Качество» с Lampa.Player'ом.
-        // Lampa плеер выбирает уровень по Storage.video_quality_default (число: 480/720/1080/1440/2160).
-        // Перед запуском выставляем его в соответствии с выбором. 'auto' = лучшее (4096).
+        // Применяем выбор качества к данным, которые идут в Lampa.Player. Lampa внутри play()
+        // переписывает data.url = getUrlQuality(data.quality) — выбирая ключ где
+        // parseInt(ключ) == Storage.field('video_quality_default') (строка '480'/'720'/'1080'/'1440'/'2160').
+        // Ставим этот storage временно перед play(), потом восстанавливаем.
+        var SAVED_VQD = null;
         function applyQualityToPlayer() {
             var qPref = Lampa.Storage.get(STORAGE.quality, 'auto');
-            var n = qPref === 'auto' ? 4096 : (parseInt(qPref, 10) || 0);
-            if (n) try { Lampa.Storage.set('video_quality_default', n); } catch (e) {}
+            try { SAVED_VQD = Lampa.Storage.get('video_quality_default', '1080'); } catch (e) {}
+            if (qPref && qPref !== 'auto') {
+                var n = parseInt(qPref, 10) || 0;
+                if (n) {
+                    try { Lampa.Storage.set('video_quality_default', String(n)); } catch (e) {}
+                    console.log('REZKA', 'applyQualityToPlayer set video_quality_default=', String(n), 'pref=', qPref);
+                }
+            } else {
+                // «Максимальное» — попробуем 4096, и Lampa поищет лучший фолбэк через set_better
+                try { Lampa.Storage.set('video_quality_default', '4096'); } catch (e) {}
+                console.log('REZKA', 'applyQualityToPlayer set video_quality_default=4096 (auto)');
+            }
+            // Восстановим исходное значение через 30с — Lampa.Player уже прочитает его в play()
+            setTimeout(function () {
+                if (SAVED_VQD !== null) {
+                    try { Lampa.Storage.set('video_quality_default', SAVED_VQD); } catch (e) {}
+                    SAVED_VQD = null;
+                }
+            }, 30000);
         }
 
         // ====================================================================
