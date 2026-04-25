@@ -21,7 +21,7 @@
      * ==================================================== */
     var manifest = {
         type: 'video',
-        version: '1.0.1',
+        version: '1.0.2',
         name: 'HDREZKA',
         description: 'Просмотр фильмов и сериалов с HDREZKA по личному аккаунту',
         component: 'rezka_online'
@@ -93,6 +93,8 @@
 
     /**
      * Pass URL through optional CORS proxy if user configured one.
+     * If proxy is empty AND we run in a CORS-restricted browser context,
+     * we still try the direct URL — Lampa Android-APK bypasses CORS natively.
      */
     function proxify(url) {
         var p = (Lampa.Storage.get(STORAGE.proxy) || '').trim();
@@ -100,6 +102,23 @@
         // Lampac-style: <proxy>/<url>
         if (p.slice(-1) !== '/') p += '/';
         return p + url;
+    }
+
+    /**
+     * Public CORS proxies tried when the user has not configured one
+     * and when direct request hits a network error in browser context.
+     */
+    var FALLBACK_PROXIES = [
+        'https://cors.cfhttp.top/',
+        'https://api.allorigins.win/raw?url=',
+        'https://corsproxy.io/?'
+    ];
+
+    function viaProxy(prefix, url) {
+        if (prefix.indexOf('?url=') !== -1 || prefix.slice(-1) === '?') {
+            return prefix + encodeURIComponent(url);
+        }
+        return prefix + url;
     }
 
     /**
@@ -175,67 +194,78 @@
 
     /* ====================================================
      *  Auth: login to HDREZKA
+     *  Используем Lampa.Reguest — в Android-билдах он идёт
+     *  через нативный стек (без CORS), в браузере — fallback на прокси.
      * ==================================================== */
     function authenticate(login, password, cb) {
-        var url = proxify(getDomain() + '/ajax/login/?t=' + Date.now());
         var post = 'login_name=' + encodeURIComponent(login) +
                    '&login_password=' + encodeURIComponent(password) +
                    '&login_not_save=0';
 
-        var net = new Lampa.Reguest();
-        net.timeout(15000);
+        var userProxy = (Lampa.Storage.get(STORAGE.proxy) || '').trim();
+        var attemptedProxies = userProxy
+            ? [userProxy.endsWith('/') ? userProxy : userProxy + '/']
+            : [''].concat(FALLBACK_PROXIES); // сначала прямой, потом прокси
 
-        // We need raw response WITH Set-Cookie. Lampa.Reguest does not always
-        // expose headers, so we fall back to XHR directly.
-        try {
-            var xhr = new XMLHttpRequest();
-            xhr.open('POST', url, true);
-            xhr.setRequestHeader('Content-Type', 'application/x-www-form-urlencoded');
-            xhr.setRequestHeader('X-Requested-With', 'XMLHttpRequest');
-            xhr.setRequestHeader('Referer', getDomain() + '/');
-            xhr.withCredentials = true;
-            xhr.timeout = 15000;
-            xhr.onload = function () {
-                var ok = false, msg = '';
-                try {
-                    var json = JSON.parse(xhr.responseText);
-                    ok = !!json.success;
-                    msg = json.message || '';
-                } catch (e) { msg = 'Некорректный ответ сервера'; }
-
-                if (ok) {
-                    // Try to read Set-Cookie. In a browser this is blocked;
-                    // we therefore read document.cookie which the server set
-                    // (the request was same-origin via the proxy / direct).
-                    var cookieStr = '';
-                    try {
-                        cookieStr = document.cookie || '';
-                    } catch (e) {}
-                    // Filter to dle_* cookies only
-                    var dle = cookieStr.split(';').map(function (s) { return s.trim(); })
-                        .filter(function (s) { return /^dle_(user_id|password|hash|forum_sessions)=/.test(s); })
-                        .join('; ');
-
-                    Lampa.Storage.set(STORAGE.cookie, dle);
-                    Lampa.Storage.set(STORAGE.status, 'logged');
-                    cb(true, 'Успешный вход');
-                } else {
-                    Lampa.Storage.set(STORAGE.status, 'error:' + (msg || 'login failed'));
-                    cb(false, msg || 'Не удалось войти');
-                }
-            };
-            xhr.onerror = function () {
+        function tryNext(idx) {
+            if (idx >= attemptedProxies.length) {
                 Lampa.Storage.set(STORAGE.status, 'error:network');
-                cb(false, 'Сетевая ошибка');
-            };
-            xhr.ontimeout = function () {
-                Lampa.Storage.set(STORAGE.status, 'error:timeout');
-                cb(false, 'Превышено время ожидания');
-            };
-            xhr.send(post);
-        } catch (e) {
-            cb(false, 'Ошибка: ' + e.message);
+                return cb(false, 'Сетевая ошибка — попробуйте указать CORS-прокси в настройках');
+            }
+            var prefix = attemptedProxies[idx];
+            var fullUrl = getDomain() + '/ajax/login/?t=' + Date.now();
+            var url = prefix ? viaProxy(prefix, fullUrl) : fullUrl;
+
+            console.log('REZKA', 'login attempt #' + idx + ' via', prefix || 'direct');
+
+            var net = new Lampa.Reguest();
+            net.timeout(15000);
+            net.silent(url, function (response) {
+                // success callback
+                handleResponse(response, cb);
+            }, function (xhr, status) {
+                // error callback — пробуем следующий прокси
+                console.log('REZKA', 'login error via', prefix || 'direct', '→ status', status);
+                tryNext(idx + 1);
+            }, post, {
+                dataType: 'text',
+                headers: {
+                    'Content-Type': 'application/x-www-form-urlencoded',
+                    'X-Requested-With': 'XMLHttpRequest',
+                    'Referer': getDomain() + '/'
+                }
+            });
         }
+
+        function handleResponse(response, cb) {
+            var ok = false, msg = '';
+            try {
+                var text = (typeof response === 'string') ? response : (response && response.responseText) || JSON.stringify(response);
+                var json = (typeof response === 'object' && response !== null && 'success' in response)
+                    ? response
+                    : JSON.parse(text);
+                ok = !!json.success;
+                msg = json.message || json.log || '';
+            } catch (e) {
+                msg = 'Некорректный ответ сервера';
+            }
+
+            if (ok) {
+                var cookieStr = '';
+                try { cookieStr = document.cookie || ''; } catch (e) {}
+                var dle = cookieStr.split(';').map(function (s) { return s.trim(); })
+                    .filter(function (s) { return /^dle_(user_id|password|hash|forum_sessions)=/.test(s); })
+                    .join('; ');
+                Lampa.Storage.set(STORAGE.cookie, dle);
+                Lampa.Storage.set(STORAGE.status, 'logged');
+                cb(true, 'Успешный вход');
+            } else {
+                Lampa.Storage.set(STORAGE.status, 'error:' + (msg || 'login failed'));
+                cb(false, msg || 'Не удалось войти (проверьте логин/пароль)');
+            }
+        }
+
+        tryNext(0);
     }
 
     function logout() {
