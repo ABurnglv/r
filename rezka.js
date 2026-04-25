@@ -21,7 +21,7 @@
      * ==================================================== */
     var manifest = {
         type: 'video',
-        version: '1.0.8',
+        version: '1.0.9',
         name: 'HDREZKA',
         description: 'Просмотр фильмов и сериалов с HDREZKA по личному аккаунту',
         component: 'rezka_online'
@@ -74,7 +74,10 @@
     }
 
     function isLoggedIn() {
-        return Lampa.Storage.get(STORAGE.status) === 'logged' && !!getCookie();
+        // Сессия может жить в OkHttp CookieJar (Android-нативный стек) — тогда
+        // getCookie() пуст, но запросы всё равно проходят авторизованно.
+        // Поэтому достаточно факта что статус == 'logged'.
+        return Lampa.Storage.get(STORAGE.status) === 'logged';
     }
 
     function buildHeaders(extra) {
@@ -295,18 +298,74 @@
             }
 
             if (ok) {
+                // 1) пробуем достать cookies из document.cookie (на веб-Lampa может работать)
                 var cookieStr = '';
                 try { cookieStr = document.cookie || ''; } catch (e) {}
                 var dle = cookieStr.split(';').map(function (s) { return s.trim(); })
                     .filter(function (s) { return /^dle_(user_id|password|hash|forum_sessions)=/.test(s); })
                     .join('; ');
-                Lampa.Storage.set(STORAGE.cookie, dle);
+                if (dle) Lampa.Storage.set(STORAGE.cookie, dle);
                 Lampa.Storage.set(STORAGE.status, 'logged');
-                done(true, 'Успешный вход' + (dle ? '' : ' (cookie сохранён браузером)'));
+                console.log('REZKA', 'login OK; document.cookie dle=', dle ? 'YES' : 'NO');
+
+                // 2) Verification test: на Android cookies хранятся в OkHttp CookieJar.
+                // Чтобы убедиться что сессия применяется к последующим запросам —
+                // дёрнем главную и проверим, виден ли залогиненный пользователь.
+                verifySession(function (verified, hint) {
+                    if (verified) {
+                        console.log('REZKA', 'session verified via', hint);
+                        done(true, 'Вход успешен. Сессия активна (' + hint + ')');
+                    } else {
+                        console.log('REZKA', 'session verify FAILED:', hint);
+                        // Логин-ответ был ОК, но сервер всё равно отдаёт страницу логина —
+                        // значит cookies не доходят до native-стека.
+                        Lampa.Storage.set(STORAGE.status, 'logged'); // оставим logged — пробуем
+                        done(true,
+                            'Вход OK, но сессия не пробрасывается в Lampa-Android. ' +
+                            'Используйте "Cookie (ручной вход)" — скопируйте dle_user_id и dle_password из браузера');
+                    }
+                });
             } else {
                 Lampa.Storage.set(STORAGE.status, 'error:' + (msg || 'login failed'));
                 done(false, msg || 'Не удалось войти (проверьте логин/пароль)');
             }
+        }
+
+        // Verifies session by hitting the homepage and looking for an authenticated
+        // marker. If document.cookie has dle_user_id we're already done.
+        // Otherwise we hope that Android OkHttp's CookieJar carries cookies forward.
+        function verifySession(cb) {
+            // shortcut: если у нас уже есть Storage.cookie — считаем верифицированным
+            if (getCookie()) return cb(true, 'document.cookie');
+
+            var net = new Lampa.Reguest();
+            net.timeout(10000);
+            var url = getDomain() + '/?t=' + Date.now();
+            var fn = (typeof net['native'] === 'function' &&
+                      Lampa.Platform && Lampa.Platform.is && Lampa.Platform.is('android'))
+                     ? net['native'] : net.silent;
+            fn.call(net, url, function (html) {
+                var s = String(html || '').slice(0, 30000);
+                // Признаки залогиненного пользователя:
+                //   <a href="/users/..." — ссылка на профиль
+                //   data-uid="\d+" — идентификатор юзера
+                //   <div class="b-user-section" — личный блок
+                //   /logout/ — кнопка выхода
+                var loggedHints = /href="\/(?:logout|user)\/|class="b-user-section|data-uid="\d+"|<a[^>]+class="b-topnav__layer-controls__logout"|name="action"\s+value="logout"/i;
+                var loginHints = /<title>\s*Вход\s*<\/title>|id="login_name"|action="\/ajax\/login\/"/i;
+                if (loggedHints.test(s)) cb(true, 'OkHttp jar');
+                else if (loginHints.test(s)) cb(false, 'server returned login page');
+                else cb(false, 'no auth markers (' + s.length + ' bytes)');
+            }, function (xhr, st) {
+                cb(false, 'verify network error: ' + st);
+            }, false, {
+                dataType: 'text',
+                headers: {
+                    'User-Agent': 'Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36',
+                    'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8',
+                    'Accept-Language': 'ru,en;q=0.9'
+                }
+            });
         }
 
         tryNext(0);
@@ -387,7 +446,15 @@
     function fetchFilmPage(filmUrl, cb, err) {
         console.log('REZKA', 'fetchFilmPage url=', filmUrl);
         request({ url: proxify(filmUrl), dataType: 'text' }, function (str) {
-            console.log('REZKA', 'fetchFilmPage response len=', (str || '').length);
+            var slen = (str || '').length;
+            console.log('REZKA', 'fetchFilmPage response len=', slen);
+            // Диагностика: сервер отдаёт страницу входа — значит сессия не применилась
+            if (typeof str === 'string' && /<title>\s*Вход\s*<\/title>/i.test(str)) {
+                console.log('REZKA', 'fetchFilmPage ⚠️ Сервер вернул страницу ЛОГИНА. cookie len=', getCookie().length, 'status=', Lampa.Storage.get(STORAGE.status));
+                Lampa.Noty && Lampa.Noty.show && Lampa.Noty.show('HDREZKA: сессия не применилась. Введите cookie вручную в настройках.');
+                if (err) err({status: 401}, 'login required');
+                return;
+            }
             var info = {
                 film_id: '',
                 is_series: false,
@@ -712,9 +779,16 @@
                     buildFilter();
                     buildList();
                     self.activity.toggle();
-                }, function (msg) {
+                }, function (xhr, msg) {
                     self.activity.loader(false);
-                    showError(msg);
+                    var status = (xhr && xhr.status) || 0;
+                    var text;
+                    if (status === 401 || msg === 'login required') {
+                        text = 'HDREZKA требует вход. Откройте Настройки → HDREZKA → "Cookie (ручной вход)" и вставьте dle_user_id=...; dle_password=... из браузера.';
+                    } else {
+                        text = 'Ошибка загрузки страницы фильма' + (msg ? ': ' + msg : '');
+                    }
+                    showError(text);
                     self.activity.toggle();
                 });
             });
