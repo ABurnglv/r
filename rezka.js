@@ -21,7 +21,7 @@
      * ==================================================== */
     var manifest = {
         type: 'video',
-        version: '1.0.5',
+        version: '1.0.6',
         name: 'HDREZKA',
         description: 'Просмотр фильмов и сериалов с HDREZKA по личному аккаунту',
         component: 'rezka_online'
@@ -166,19 +166,54 @@
     }
 
     /**
-     * Network helper – wraps Lampa.Reguest / native fetch.
+     * Network helper – wraps Lampa.Reguest.
+     *
+     * Важно: HDREZKA блокирует CORS-запросы из браузера. В Android-Lampa
+     * есть специальный метод network["native"], который использует нативный
+     * HTTP-стек (OkHttp) — он обходит CORS и поддерживает ручные cookies
+     * через заголовок Cookie. Для веб-клиентов и iOS/Tizen — падаем обратнона silent.
      */
     function request(opts, success, error) {
         var network = new Lampa.Reguest();
         network.timeout(15000);
-        network.silent(opts.url, function (resp) {
-            success(resp);
-        }, function (a, b) {
-            error(a, b);
-        }, opts.post || false, {
+
+        var headers = buildHeaders(opts.headers);
+        // С native-стеком запрещённые браузерные заголовки не используются, но при silent
+        // браузер выкидывает ReferenceError на Referer/Cookie. Чистим их для silent fallback.
+        var safeHeaders = {};
+        for (var k in headers) {
+            var lk = k.toLowerCase();
+            if (lk === 'cookie' || lk === 'referer' || lk === 'user-agent' || lk === 'host') continue;
+            safeHeaders[k] = headers[k];
+        }
+
+        var params = {
             dataType: opts.dataType || 'text',
-            headers: buildHeaders(opts.headers)
-        });
+            headers: headers,
+            withCredentials: true
+        };
+
+        function callSilent() {
+            network.silent(opts.url, success, function (a, b) { error(a, b); },
+                opts.post || false,
+                { dataType: opts.dataType || 'text', headers: safeHeaders });
+        }
+
+        // 1) Предпочтительно — native (Android APK)
+        try {
+            if (typeof network["native"] === 'function' &&
+                Lampa.Platform && Lampa.Platform.is && Lampa.Platform.is('android')) {
+                network["native"](opts.url, success, function (a, b) {
+                    // fallback на silent в случае ошибки native-стека
+                    console.log('REZKA', 'native fail, falling back to silent', a, b);
+                    callSilent();
+                }, opts.post || false, params);
+                return network;
+            }
+        } catch (e) { /* fall through to silent */ }
+
+        // 2) silent для веб/iOS/Tizen — без запрещённых заголовков
+        callSilent();
         return network;
     }
 
@@ -767,17 +802,10 @@
                 return false;
             }
 
-            // Фокусируем кнопку (чтобы она была сразу под указателем)
-            try {
-                var enabled = Lampa.Controller.enabled() && Lampa.Controller.enabled().name;
-                if (enabled === 'content' || enabled === 'full_start' || enabled === 'settings_component') {
-                    Lampa.Controller.toggle(enabled);
-                    if (typeof Navigator !== 'undefined' && Navigator.focus) {
-                        Navigator.focus(btn[0]);
-                    }
-                }
-            } catch (err) { /* noop */ }
-
+            // Фокус СПЕЦИАЛЬНО НЕ ПЕРЕСТАВЛЯЕМ и controller НЕ трогаем.
+            // Иначе другие online-плагины (modss, online_mod и т.п.) не успевают
+            // вставить свои кнопки (они подгружаются POST-запросом со задержкой).
+            // Первая кнопка в контейнере и так получит фокус по умолчанию.
             return true;
         }
 
@@ -785,15 +813,20 @@
         Lampa.Listener.follow('full', function (e) {
             if (e.type !== 'complite') return;
             try {
-                insertButton(e.object.activity.render(), e.data.movie);
+                var rendered = e.object.activity.render();
+                var movie = e.data.movie;
+                // Первая попытка — сразу
+                insertButton(rendered, movie);
+                // Вторая попытка через 1.5с — если при первой попытке кнопки
+                // .button--play / .button--priority ещё не было (вёрстка CUB рендерится асинхронно),
+                // вставим повторно — функция сама проверяет дублирование.
+                setTimeout(function () { insertButton(rendered, movie); }, 1500);
             } catch (err) {
                 console.log('REZKA', 'addCardButton complite error', err);
             }
         });
 
         // Если плагин загрузился ПОСЛЕ того, как карточка уже была отрисована
-        // (типичный кейс: пользователь установил плагин и сразу открыл фильм),
-        // событие 'complite' к нам не придёт. Принудительно вставим кнопку.
         try {
             var act = Lampa.Activity && Lampa.Activity.active && Lampa.Activity.active();
             if (act && act.component === 'full' && act.activity) {
