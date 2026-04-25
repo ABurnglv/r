@@ -21,7 +21,7 @@
      * ==================================================== */
     var manifest = {
         type: 'video',
-        version: '1.0.20',
+        version: '1.0.21',
         name: 'HDREZKA',
         description: 'Просмотр фильмов и сериалов с HDREZKA по личному аккаунту',
         component: 'rezka_online'
@@ -707,7 +707,14 @@
             try {
                 var json = typeof resp === 'string' ? JSON.parse(resp) : resp;
                 if (!json || !json.success) {
-                    err && err((json && json.message) || 'Сервер вернул ошибку');
+                    var srvMsg = (json && json.message) || 'Сервер вернул ошибку';
+                    // Частый кейс — "Время сессии истекло". Подскажем пользователю
+                    // что нужно обновить куки в настройках плагина.
+                    if (/истек|сесси|expired|not authoriz|unauth/i.test(srvMsg)) {
+                        srvMsg = 'Сессия rezka истекла. Обновите cookie в Настройки → HDREZKA → Cookie';
+                    }
+                    console.log('REZKA', 'getStream server fail', srvMsg, '| raw:', resp && String(resp).slice(0, 300));
+                    err && err(srvMsg);
                     return;
                 }
                 var decoded = decodeTrash(json.url);
@@ -720,11 +727,16 @@
                 });
                 // Lampa.Player выбирает уровень через parseInt(ключ) == Storage.video_quality_default.
                 // На rezka бывают ключи '4K' (parseInt=4) и '2K' (parseInt=2) — они никогда не
-                // совпадут с 1080/2160. Нормализуем имя в карте: 4K → 2160p, 2K → 1440p.
+                // совпадут с 1080/2160. Также '1080p' и '1080p Ultra' оба дают parseInt=1080 —
+                // Lampa не может отличить их и всегда даёт первый 1080. Решение: мапим
+                // "1080p Ultra" в "1440p" — это свободная ступень на rezka, и в Lampa это
+                // отдельный уровень (1440), который Lampa легко переключает. Пользователь
+                // видит "1440p Ultra" в меню плеера и может различить от обычного 1080p.
                 function normalizeQualityLabel(label) {
                     var s = String(label || '').trim();
                     if (/^4K\b/i.test(s)) return s.replace(/^4K\b/i, '2160p');
                     if (/^2K\b/i.test(s)) return s.replace(/^2K\b/i, '1440p');
+                    if (/^1080p\s+Ultra\b/i.test(s)) return '1440p Ultra';
                     return s;
                 }
                 sortedItems.forEach(function (it) { qualities[normalizeQualityLabel(it.label)] = it.file; });
@@ -783,6 +795,48 @@
             var m = part.match(/\[([^\]]+)\](.+)/);
             return m ? { label: m[1], url: m[2] } : null;
         }).filter(Boolean);
+    }
+
+    /* ====================================================
+     *  TMDB episode names cache
+     *  rezka всегда отдаёт эпизоды как "Серия N" — реальные имена
+     *  доступны только через TMDB. Lampa уже передаёт TMDB id в object.movie.id.
+     * ==================================================== */
+    var _tmdbEpCache = {}; // key: tmdbId+':'+season -> { ep_number: name }
+
+    function fetchTMDBEpisodes(tmdbId, seasonNum, cb) {
+        if (!tmdbId || !seasonNum) { cb({}); return; }
+        var key = tmdbId + ':' + seasonNum;
+        if (_tmdbEpCache[key]) { cb(_tmdbEpCache[key]); return; }
+        try {
+            if (!Lampa.TMDB || typeof Lampa.TMDB.api !== 'function') {
+                console.log('REZKA', 'TMDB api unavailable, skipping episode names');
+                cb({}); return;
+            }
+            var lang = '';
+            try { lang = Lampa.Storage.get('tmdb_lang') || Lampa.Storage.get('language') || 'ru'; } catch(e) { lang = 'ru'; }
+            var apiUrl = Lampa.TMDB.api('tv/' + tmdbId + '/season/' + seasonNum + '?language=' + encodeURIComponent(lang));
+            var net = new Lampa.Reguest();
+            net.timeout(8000);
+            net.silent(apiUrl, function (json) {
+                var map = {};
+                if (json && json.episodes && json.episodes.length) {
+                    json.episodes.forEach(function (e) {
+                        if (e && e.episode_number) map[e.episode_number] = e.name || '';
+                    });
+                }
+                _tmdbEpCache[key] = map;
+                console.log('REZKA', 'TMDB episodes fetched: tmdb=' + tmdbId + ' s=' + seasonNum + ' → ' + Object.keys(map).length + ' names');
+                cb(map);
+            }, function (xhr, msg) {
+                console.log('REZKA', 'TMDB episodes fetch fail', msg, xhr && xhr.status);
+                _tmdbEpCache[key] = {};
+                cb({});
+            });
+        } catch (e) {
+            console.log('REZKA', 'TMDB call exception', e && e.message);
+            cb({});
+        }
     }
 
     /* ====================================================
@@ -1004,8 +1058,10 @@
                     var playlist = items.map(function (ep, i) {
                         var sNum = parseInt(ep.season_id || season.id, 10) || 0;
                         var eNum = parseInt(ep.episode_id || ep.name, 10) || 0;
+                        // Предпочитаем имя эпизода из TMDB (ep.tmdb_name), иначе — "Серия N"
+                        var epLabel = ep.tmdb_name ? ('Серия ' + eNum + '. ' + ep.tmdb_name) : (ep.name || ('Серия ' + (i + 1)));
                         var cell = {
-                            title: movieTitle + ' — ' + (ep.name || ('Серия ' + (i + 1))),
+                            title: movieTitle + ' — ' + epLabel,
                             season: sNum,
                             episode: eNum,
                             voice_name: voice.name
@@ -1162,14 +1218,18 @@
                     return String(e.season_id) === String(season.id);
                 }) : [];
                 var origTitleS = (object.movie.original_name || object.movie.original_title || movieTitle || '');
+                var sNumGlobal = season ? (parseInt(season.id, 10) || 0) : 0;
+                var renderedCards = []; // [{card, ep, idx}] — для дообновления имён из TMDB
                 items.forEach(function (ep, epIdx) {
                     // Hash каждой серии индивидуален (формула lampac):
                     // [season_number, ':' если season>10, episode_number, original_title]
                     var sNum = parseInt(ep.season_id || season.id, 10) || 0;
                     var eNum = parseInt(ep.episode_id || ep.name, 10) || 0;
                     var hash = strHash([sNum, sNum > 10 ? ':' : '', eNum, origTitleS].join(''));
+                    // Базовый title с резервным именем (будет обновлён после TMDB)
+                    var baseTitle = 'Серия ' + eNum;
                     var card = makePrestigeCard({
-                        title: ep.name,
+                        title: baseTitle,
                         time: episodeRuntime,
                         info: [voice.name, season.name],
                         quality: qualityLabel,
@@ -1183,9 +1243,26 @@
                         try { scroll.update($(e.target), true); } catch (er) {}
                     });
                     html.append(card);
+                    renderedCards.push({ card: card, ep: ep, idx: epIdx, eNum: eNum });
                 });
                 if (!items.length) {
                     html.append('<div style="padding:1em;color:#ccc">Без серий в этом сезоне</div>');
+                }
+                // Доподгружаем имена из TMDB и обновляем текст карточек (без ререндера)
+                if (renderedCards.length && object.movie && object.movie.id && sNumGlobal) {
+                    fetchTMDBEpisodes(object.movie.id, sNumGlobal, function (nameMap) {
+                        if (!nameMap) return;
+                        renderedCards.forEach(function (rc) {
+                            var nm = nameMap[rc.eNum];
+                            if (nm) {
+                                rc.ep.tmdb_name = nm; // сохраним в ep — playSeries возьмёт оттуда
+                                try {
+                                    var titleEl = rc.card.find('.rezka-prestige__title, .online__title').first();
+                                    if (titleEl.length) titleEl.text('Серия ' + rc.eNum + '. ' + nm);
+                                } catch (e) {}
+                            }
+                        });
+                    });
                 }
             } else {
                 // Фильм: ОДНА карточка фильма. Все озвучки уходят в плеер как playlist —
