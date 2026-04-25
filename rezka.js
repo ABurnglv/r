@@ -21,7 +21,7 @@
      * ==================================================== */
     var manifest = {
         type: 'video',
-        version: '1.0.14',
+        version: '1.0.15',
         name: 'HDREZKA',
         description: 'Просмотр фильмов и сериалов с HDREZKA по личному аккаунту',
         component: 'rezka_online'
@@ -36,7 +36,8 @@
         password: 'rezka_password',
         cookie:   'rezka_cookie',     // dle_user_id=...; dle_password=...
         status:   'rezka_status',     // 'logged' | 'guest' | 'error:<msg>'
-        proxy:    'rezka_proxy_url'   // optional CORS proxy
+        proxy:    'rezka_proxy_url',  // optional CORS proxy
+        quality:  'rezka_quality'     // выбранное качество: 'auto'|'2160p'|'1080p Ultra'|'1080p'|'720p'|'480p'|'360p'
     };
 
     /* Безопасный вызов Lampa.Storage.add — в разных билдах Lampa
@@ -652,10 +653,20 @@
                 if (!items.length) { err && err('Пустой плейлист'); return; }
                 var qualities = {};
                 items.forEach(function (it) { qualities[it.label] = it.file; });
+                // Плейлист от hdrezka.fi отдаёт качества в порядке от худшего (360p) к лучшему (4K).
+                // Выбираем файл по пользовательскому предпочтению (Storage rezka_quality), fallback — лучшее.
+                var qPref = Lampa.Storage.get(STORAGE.quality, 'auto');
+                var picked = items[items.length - 1]; // по умолчанию — лучшее
+                if (qPref && qPref !== 'auto') {
+                    for (var i = 0; i < items.length; i++) {
+                        if (items[i].label === qPref) { picked = items[i]; break; }
+                    }
+                }
                 cb({
                     title: '',
-                    file: items[items.length - 1].file, // лучшее (последнее) качество
+                    file: picked.file,
                     quality: qualities,
+                    chosenQuality: picked.label,
                     subtitles: parseSubtitles(json.subtitle)
                 });
             } catch (e) {
@@ -801,11 +812,15 @@
             return Math.abs(h).toString(36);
         }
 
-        // Создаёт prestige-карточку в стиле lampac (постер + таймлайн + инфо + качество)
+        // Создаёт prestige-карточку в стиле lampac (постер + таймлайн + детали просмотра + инфо + качество)
         function makePrestigeCard(opts) {
-            // opts: {title, time, info[], quality, hash, poster}
-            var infoLine = (opts.info || []).filter(Boolean).map(escapeHTML)
-                .join('<span class="rezka-prestige-split">●</span>');
+            // opts: {title, time, info[] (может быть HTML в элементах), quality, hash, poster, tagline}
+            var infoParts = [];
+            if (opts.tagline) infoParts.push('<span class="tagline">«' + escapeHTML(opts.tagline) + '»</span>');
+            (opts.info || []).filter(Boolean).forEach(function (i) {
+                infoParts.push('<span>' + escapeHTML(i) + '</span>');
+            });
+            var infoLine = infoParts.join('<span class="rezka-prestige-split">●</span>');
             var card = $(Lampa.Template.get('rezka_prestige_full', {
                 title:   escapeHTML(opts.title || ''),
                 time:    escapeHTML(opts.time  || ''),
@@ -820,14 +835,20 @@
                 img.on('error', function () { img.attr('src', ''); imgWrap.css('background', '#333'); });
                 img.attr('src', opts.poster);
             }
-            // берём существующую Timeline view (или создаём) — привязываем к card.timeline,
-            // чтобы в playVoice() передать этот же объект в Player.play({timeline: ...}) —
-            // Lampa.Player будет сам обновлять прогресс в Storage по этому hash.
+            // Timeline view + render прогресс-бара + Lampa.Timeline.details для текста
+            // «Просмотрено — 1ч 10м из 1ч 28м / 79%». Оба элемента обновляются Lampa
+            // автоматически по data-hash при любом Timeline.update().
             try {
                 if (opts.hash && Lampa.Timeline) {
                     var view = Lampa.Timeline.view(opts.hash);
                     card.data('timeline', view);
                     card.find('.rezka-prestige__timeline').append(Lampa.Timeline.render(view));
+                    if (Lampa.Timeline.details) {
+                        var det = Lampa.Timeline.details(view);
+                        card.find('.rezka-prestige__details')
+                            .toggleClass('hide', !view.percent)
+                            .append(det);
+                    }
                 }
             } catch (e) { /* timeline optional */ }
             return card;
@@ -861,6 +882,25 @@
             var poster = getPoster();
             var movieTitle = (object.movie.title || object.movie.name || '');
             var meta = movieMeta();
+            var tagline = object.movie.tagline || '';
+            var qualityPref = getQualityPref();
+            var qualityLabel = (qualityPref && qualityPref !== 'auto') ? qualityPref : '';
+
+            // Длительность фильма / эпизода (минуты → строка ЧЧ:ММ)
+            function fmtMin(min) {
+                min = parseInt(min, 10);
+                if (!min || isNaN(min)) return '';
+                var h = Math.floor(min / 60);
+                var m = min % 60;
+                if (h <= 0) return ('0:' + (m < 10 ? '0' : '') + m);
+                return (h + ':' + (m < 10 ? '0' : '') + m);
+            }
+            var movieRuntime = fmtMin(object.movie.runtime);
+            var episodeRuntime = '';
+            if (object.movie.episode_run_time && object.movie.episode_run_time.length) {
+                episodeRuntime = fmtMin(object.movie.episode_run_time[0]);
+            }
+            if (!episodeRuntime) episodeRuntime = movieRuntime;
 
             if (info.is_series) {
                 // Сериал: выбранная озвучка + сезон → список серий
@@ -875,11 +915,12 @@
                     var hash = strHash([season.name || season.id, season.id > 10 ? ':' : '', ep.name, origTitle].join(''));
                     var card = makePrestigeCard({
                         title: ep.name,
-                        time: '',
+                        time: episodeRuntime,
                         info: [voice.name, season.name],
-                        quality: '',
+                        quality: qualityLabel,
                         hash: hash,
-                        poster: poster
+                        poster: poster,
+                        tagline: tagline
                     });
                     var tl = card.data('timeline');
                     card.on('hover:enter', function () { playVoice(info, voice, season, ep, tl); });
@@ -900,11 +941,12 @@
                     var hash = strHash(origTitle + '|' + voice.name);
                     var card = makePrestigeCard({
                         title: voice.name,
-                        time: '',
+                        time: movieRuntime,
                         info: meta,
-                        quality: '',
+                        quality: qualityLabel,
                         hash: hash,
-                        poster: poster
+                        poster: poster,
+                        tagline: tagline
                     });
                     var tl = card.data('timeline');
                     card.on('hover:enter', function () {
@@ -924,44 +966,65 @@
             Lampa.Controller.enable('content');
         }
 
+        // Качества которые отдаёт HDREZKA (порядок от лучшего к худшему).
+        // Используем этот список и в sort-меню вверху, и для выбора по умолчанию в getStream.
+        var QUALITY_ORDER = ['2160p Ultra', '2160p', '1440p', '1080p Ultra', '1080p', '720p', '480p', '360p'];
+
+        function getQualityPref() { return Lampa.Storage.get(STORAGE.quality, 'auto'); }
+        function setQualityPref(q) { Lampa.Storage.set(STORAGE.quality, q); }
+
         function buildFilter() {
             if (!state.info) return;
             var info = state.info;
-            // Правый блок в фильтре = «Источник [HDRezka]» (sort)
-            try { filter.set('sort', [{ title: 'HDRezka', selected: true, source: 'rezka' }]); } catch (e) {}
-            try { filter.chosen('sort', ['HDRezka']); } catch (e) {}
+            var qPref = getQualityPref();
+            var qLabel = qPref === 'auto' ? 'Максимальное' : qPref;
 
-            // Левый блок = «Фильтр» (для фильма — одна «Сброс»-опция, для сериала — перевод/сезон)
+            // Правый блок (sort) = переключатель качества. Сохраняется на следующие фильмы.
+            var qualityItems = [{ title: 'Максимальное', value: 'auto', selected: qPref === 'auto' }]
+                .concat(QUALITY_ORDER.map(function (q) {
+                    return { title: q, value: q, selected: qPref === q };
+                }));
+            try { filter.set('sort', qualityItems); } catch (e) {}
+            try { filter.chosen('sort', [qLabel]); } catch (e) {}
+
+            // Левый блок (filter) = Перевод (+Сезон для сериала)
             var select = [];
             var chosen = [];
-            if (info.is_series) {
+            if (info.voice && info.voice.length) {
+                var vName = (info.voice[state.choice.voice] || info.voice[0] || {}).name || '—';
                 var voiceItems = info.voice.map(function (v, i) {
                     return { title: v.name, selected: i === state.choice.voice, index: i };
                 });
-                if (voiceItems.length) {
-                    var vName = (info.voice[state.choice.voice] || info.voice[0] || {}).name || '—';
-                    select.push({ title: 'Перевод', subtitle: vName, items: voiceItems, stype: 'voice' });
-                    chosen.push('Перевод: ' + vName);
-                }
+                select.push({ title: 'Перевод', subtitle: vName, items: voiceItems, stype: 'voice' });
+                chosen.push('Перевод: ' + vName);
+            }
+            if (info.is_series && info.season.length) {
+                var sName = (info.season[state.choice.season] || {}).name || '—';
                 var seasonItems = info.season.map(function (s, i) {
                     return { title: s.name, selected: i === state.choice.season, index: i };
                 });
-                if (seasonItems.length) {
-                    var sName = (info.season[state.choice.season] || {}).name || '—';
-                    select.push({ title: 'Сезон', subtitle: sName, items: seasonItems, stype: 'season' });
-                    chosen.push('Сезон: ' + sName);
-                }
-            } else {
-                // Для фильма — все озвучки видны в списке, фильтр оставляем пустым (но плашка видна)
-                chosen.push('Все озвучки');
+                select.push({ title: 'Сезон', subtitle: sName, items: seasonItems, stype: 'season' });
+                chosen.push('Сезон: ' + sName);
             }
             select.push({ title: 'Сбросить', reset: true });
             try { filter.set('filter', select); } catch (e) {}
             try { filter.chosen('filter', chosen); } catch (e) {}
+            try { filter.toggle && filter.toggle(); } catch (e) {}
+
             filter.onSelect = function (type, a, b) {
+                if (type === 'sort') {
+                    // выбор качества — без под-меню, сразу a
+                    if (a && a.value) {
+                        setQualityPref(a.value);
+                        setTimeout(Lampa.Select.close, 10);
+                        buildFilter();
+                        buildList();
+                    }
+                    return;
+                }
                 if (type !== 'filter') return;
                 if (a.reset) {
-                    state.choice.voice = 0;
+                    state.choice.voice = pickDefaultVoiceIdx(info.voice);
                     state.choice.season = 0;
                     setTimeout(Lampa.Select.close, 10);
                     buildFilter();
@@ -977,6 +1040,15 @@
                 buildFilter();
                 buildList();
             };
+        }
+
+        // Выбирает индекс дубляжа среди озвучек (дефолт — первая)
+        function pickDefaultVoiceIdx(voices) {
+            if (!voices || !voices.length) return 0;
+            for (var i = 0; i < voices.length; i++) {
+                if (/дубляж|dub/i.test(voices[i].name)) return i;
+            }
+            return 0;
         }
 
         this.initialize = function () {
@@ -996,6 +1068,11 @@
                 }
                 fetchFilmPage(results[0].url, function (info) {
                     state.info = info;
+                    state.choice.voice = pickDefaultVoiceIdx(info.voice);
+                    // Для сериала — выбираем последний сезон по умолчанию
+                    if (info.is_series && info.season.length) {
+                        state.choice.season = info.season.length - 1;
+                    }
                     self.activity.loader(false);
                     buildFilter();
                     buildList();
@@ -1033,19 +1110,22 @@
                 + '.rezka-prestige__img{position:relative;width:13em;flex-shrink:0;min-height:8.2em;border-radius:.3em;overflow:hidden;background:#222;}'
                 + '.rezka-prestige__img>img{position:absolute;top:0;left:0;width:100%;height:100%;object-fit:cover;opacity:0;transition:opacity .3s;}'
                 + '.rezka-prestige__img--loaded>img{opacity:1}'
-                + '.rezka-prestige__body{padding:1.2em;line-height:1.3;flex-grow:1;position:relative}'
+                + '.rezka-prestige__body{padding:1.2em;line-height:1.3;flex-grow:1;position:relative;display:flex;flex-direction:column;justify-content:space-between;}'
                 + '.rezka-prestige__head{display:flex;justify-content:space-between;align-items:center}'
                 + '.rezka-prestige__title{font-size:1.7em;overflow:hidden;text-overflow:ellipsis;display:-webkit-box;-webkit-line-clamp:1;-webkit-box-orient:vertical}'
-                + '.rezka-prestige__time{padding-left:2em;color:rgba(255,255,255,0.6)}'
-                + '.rezka-prestige__timeline{margin:.8em 0}'
-                + '.rezka-prestige__timeline>.time-line{display:block !important}'
-                + '.rezka-prestige__footer{display:flex;justify-content:space-between;align-items:center}'
-                + '.rezka-prestige__info{display:flex;align-items:center;color:rgba(255,255,255,0.7);font-size:.9em}'
+                + '.rezka-prestige__time{padding-left:2em;color:rgba(255,255,255,0.6);font-size:1.1em;white-space:nowrap}'
+                + '.rezka-prestige__timeline{margin:.7em 0 .35em 0}'
+                + '.rezka-prestige__timeline>.time-line{display:block !important;width:100%}'
+                + '.rezka-prestige__details{font-size:.9em;color:rgba(255,255,255,0.85);margin-bottom:.4em}'
+                + '.rezka-prestige__details .time-line-details{display:block !important}'
+                + '.rezka-prestige__details.hide{display:none}'
+                + '.rezka-prestige__footer{display:flex;justify-content:space-between;align-items:center;margin-top:auto}'
+                + '.rezka-prestige__info{display:flex;align-items:center;color:rgba(255,255,255,0.7);font-size:.9em;flex-wrap:wrap;gap:0;}'
                 + '.rezka-prestige__info>*{overflow:hidden;text-overflow:ellipsis;display:-webkit-box;-webkit-line-clamp:1;-webkit-box-orient:vertical}'
-                + '.rezka-prestige__quality{padding-left:1em;white-space:nowrap;color:#fff;font-weight:600}'
-                + '.rezka-prestige-split{font-size:.8em;margin:0 1em;flex-shrink:0;opacity:.5}'
+                + '.rezka-prestige__info .tagline{font-style:italic;color:rgba(255,255,255,0.85)}'
+                + '.rezka-prestige__quality{padding-left:1em;white-space:nowrap;color:#fff;font-weight:600;font-size:.95em}'
+                + '.rezka-prestige-split{font-size:.8em;margin:0 .8em;flex-shrink:0;opacity:.5}'
                 + '.rezka-prestige.focus::after{content:"";position:absolute;top:-0.6em;left:-0.6em;right:-0.6em;bottom:-0.6em;border-radius:.7em;border:solid .3em #fff;z-index:-1;pointer-events:none}'
-                + '.rezka-prestige__head-info{padding:.6em 1em;background:rgba(0,0,0,0.4);border-radius:.3em;margin-bottom:1em;font-size:.95em;color:rgba(255,255,255,0.85)}'
                 + '@media screen and (max-width:480px){.rezka-prestige__img{width:7em;min-height:6em}.rezka-prestige__title{font-size:1.4em}.rezka-prestige__body{padding:.8em 1.2em}}'
                 + '</style>');
             Lampa.Template.add('rezka_prestige_full',
@@ -1057,6 +1137,7 @@
               + '<div class="rezka-prestige__time">{time}</div>'
               + '</div>'
               + '<div class="rezka-prestige__timeline"></div>'
+              + '<div class="rezka-prestige__details hide"></div>'
               + '<div class="rezka-prestige__footer">'
               + '<div class="rezka-prestige__info">{info}</div>'
               + '<div class="rezka-prestige__quality">{quality}</div>'
@@ -1075,10 +1156,14 @@
     }
 
     function openRezka(movie) {
+        var name = movie.title || movie.name || '';
         Lampa.Activity.push({
             url: '',
-            title: 'HDREZKA - ' + (movie.title || movie.name || ''),
+            title: 'HDREZKA - ' + name,
             component: 'rezka_online',
+            search: name,            // выводится в лупе фильтра
+            search_one: name,
+            search_two: movie.original_title || movie.original_name || '',
             movie: movie,
             page: 1
         });
