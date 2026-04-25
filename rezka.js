@@ -21,7 +21,7 @@
      * ==================================================== */
     var manifest = {
         type: 'video',
-        version: '1.0.7',
+        version: '1.0.8',
         name: 'HDREZKA',
         description: 'Просмотр фильмов и сериалов с HDREZKA по личному аккаунту',
         component: 'rezka_online'
@@ -556,6 +556,7 @@
         };
 
         this.create = function () {
+            console.log('REZKA', 'component.create called');
             scroll.minus();
             files.appendFiles(scroll.render());
             files.appendHead(filter.render());
@@ -564,6 +565,11 @@
                 Lampa.Activity.replace({ search: value, clarification: true });
             };
             filter.onBack = function () { self.start(); };
+
+            // Lampa НЕ вызывает initialize() автоматически — вызываем сами
+            try { this.initialize(); } catch (err) {
+                console.log('REZKA', 'initialize() crashed:', err && err.message, err);
+            }
 
             return this.render();
         };
