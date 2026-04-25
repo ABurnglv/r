@@ -21,7 +21,7 @@
      * ==================================================== */
     var manifest = {
         type: 'video',
-        version: '1.0.16',
+        version: '1.0.17',
         name: 'HDREZKA',
         description: 'Просмотр фильмов и сериалов с HDREZKA по личному аккаунту',
         component: 'rezka_online'
@@ -810,26 +810,141 @@
             scroll.append(html);
         }
 
-        function playVoice(info, voice, season, episode, timeline) {
+        // ====================================================================
+        // playFilm: для фильма строит playlist из ВСЕХ озвучек.
+        // Первая воспроизводимая = выбранная по умолчанию (defIdx).
+        // Остальные грузят URL лениво по выбору в плейлисте плеера.
+        // Все entries разделяют один и тот же timeline (прогресс фильма общий).
+        // ====================================================================
+        function playFilm(info, defIdx) {
+            if (!info.voice || !info.voice.length) {
+                Lampa.Noty.show('HDREZKA: нет озвучек');
+                return;
+            }
+            defIdx = (typeof defIdx === 'number' && defIdx >= 0) ? defIdx : 0;
+            if (defIdx >= info.voice.length) defIdx = 0;
+            var movieTitle = (object.movie.title || object.movie.name || '');
+            var origTitle = (object.movie.original_title || object.movie.original_name || movieTitle || '');
+            var hash = strHash(origTitle);
+            var sharedTimeline = null;
+            try { if (Lampa.Timeline) sharedTimeline = Lampa.Timeline.view(hash); } catch (e) {}
+
             Lampa.Modal.open({
                 title: 'HDREZKA',
-                html: $('<div style="padding:1em">Получаем ссылку (' + escapeHTML(voice.name) + ')…</div>'),
+                html: $('<div style="padding:1em">Получаем ссылку (' + escapeHTML(info.voice[defIdx].name) + ')…</div>'),
                 size: 'small',
                 onBack: function () { Lampa.Modal.close(); Lampa.Controller.toggle('content'); }
             });
-            getStream(info, voice, season, episode,
-                function (data) {
+
+            getStream(info, info.voice[defIdx], null, null,
+                function (firstData) {
                     Lampa.Modal.close();
-                    var pl = {
-                        url: data.file,
-                        title: (object.movie.title || object.movie.name || '') + ' — ' + voice.name,
-                        quality: data.quality,
-                        subtitles: data.subtitles
-                    };
-                    // Передаём timeline — Lampa.Player будет сам писать прогресс по этому hash
-                    if (timeline) pl.timeline = timeline;
-                    Lampa.Player.play(pl);
-                    Lampa.Player.playlist([pl]);
+                    // Строим playlist: одна запись на каждую озвучку
+                    var playlist = info.voice.map(function (v, i) {
+                        var cell = {
+                            title: movieTitle + ' — ' + v.name,
+                            voice_name: v.name
+                        };
+                        if (sharedTimeline) cell.timeline = sharedTimeline;
+                        if (i === defIdx) {
+                            cell.url = firstData.file;
+                            cell.quality = firstData.quality;
+                            cell.subtitles = firstData.subtitles;
+                        } else {
+                            // Ленивая загрузка при выборе в плеере
+                            cell.url = function (call) {
+                                getStream(info, v, null, null,
+                                    function (data) {
+                                        cell.url = data.file;
+                                        cell.quality = data.quality;
+                                        cell.subtitles = data.subtitles;
+                                        call();
+                                    },
+                                    function () {
+                                        cell.url = '';
+                                        Lampa.Noty.show('HDREZKA: не удалось получить ссылку');
+                                        call();
+                                    });
+                            };
+                        }
+                        return cell;
+                    });
+                    var first = playlist[defIdx];
+                    first.playlist = playlist;
+                    Lampa.Player.play(first);
+                    Lampa.Player.playlist(playlist);
+                },
+                function (msg) {
+                    Lampa.Modal.close();
+                    Lampa.Noty.show('HDREZKA: ' + msg);
+                });
+        }
+
+        // ====================================================================
+        // playSeries: для сериала строит playlist всех серий выбранного сезона
+        // в выбранной озвучке. Каждая серия имеет индивидуальный timeline
+        // (прогресс сохраняется отдельно для каждой серии).
+        // epIdx — индекс серии, с которой начнётся воспроизведение.
+        // ====================================================================
+        function playSeries(info, voice, season, items, epIdx) {
+            if (!items || !items.length) { Lampa.Noty.show('HDREZKA: нет серий'); return; }
+            epIdx = (typeof epIdx === 'number' && epIdx >= 0 && epIdx < items.length) ? epIdx : 0;
+            var movieTitle = (object.movie.title || object.movie.name || '');
+            var origTitle = (object.movie.original_name || object.movie.original_title || movieTitle || '');
+
+            function epHash(ep) {
+                var sNum = parseInt(ep.season_id || season.id, 10) || 0;
+                var eNum = parseInt(ep.episode_id || ep.name, 10) || 0;
+                return strHash([sNum, sNum > 10 ? ':' : '', eNum, origTitle].join(''));
+            }
+
+            var firstEp = items[epIdx];
+            Lampa.Modal.open({
+                title: 'HDREZKA',
+                html: $('<div style="padding:1em">Получаем ссылку (' + escapeHTML(voice.name) + ' · ' + escapeHTML(firstEp.name) + ')…</div>'),
+                size: 'small',
+                onBack: function () { Lampa.Modal.close(); Lampa.Controller.toggle('content'); }
+            });
+
+            getStream(info, voice, season, firstEp,
+                function (firstData) {
+                    Lampa.Modal.close();
+                    var playlist = items.map(function (ep, i) {
+                        var sNum = parseInt(ep.season_id || season.id, 10) || 0;
+                        var eNum = parseInt(ep.episode_id || ep.name, 10) || 0;
+                        var cell = {
+                            title: movieTitle + ' — ' + (ep.name || ('Серия ' + (i + 1))),
+                            season: sNum,
+                            episode: eNum,
+                            voice_name: voice.name
+                        };
+                        try { if (Lampa.Timeline) cell.timeline = Lampa.Timeline.view(epHash(ep)); } catch (e) {}
+                        if (i === epIdx) {
+                            cell.url = firstData.file;
+                            cell.quality = firstData.quality;
+                            cell.subtitles = firstData.subtitles;
+                        } else {
+                            cell.url = function (call) {
+                                getStream(info, voice, season, ep,
+                                    function (data) {
+                                        cell.url = data.file;
+                                        cell.quality = data.quality;
+                                        cell.subtitles = data.subtitles;
+                                        call();
+                                    },
+                                    function () {
+                                        cell.url = '';
+                                        Lampa.Noty.show('HDREZKA: не удалось получить ссылку');
+                                        call();
+                                    });
+                            };
+                        }
+                        return cell;
+                    });
+                    var first = playlist[epIdx];
+                    first.playlist = playlist;
+                    Lampa.Player.play(first);
+                    Lampa.Player.playlist(playlist);
                 },
                 function (msg) {
                     Lampa.Modal.close();
@@ -946,18 +1061,21 @@
             if (!episodeRuntime) episodeRuntime = movieRuntime;
 
             if (info.is_series) {
-                // Сериал: выбранная озвучка + сезон → список серий
+                // Сериал: одна карточка на КАЖДУЮ серию (выбранная озвучка как в фильтре).
+                // По нажатию запускается плеер с плейлистом всех серий сезона —
+                // переключение озвучки доступно через фильтр «Перевод».
                 var voice = info.voice[state.choice.voice] || info.voice[0];
                 var season = info.season[state.choice.season];
                 var items = season ? info.episode.filter(function (e) {
                     return String(e.season_id) === String(season.id);
                 }) : [];
-                items.forEach(function (ep) {
-                    // Формула hash идентична lampac/Lampa.Full.js: [season_number, ':' если season>10, episode_number, original_title]
-                    var origTitle = (object.movie.original_name || object.movie.original_title || movieTitle || '');
+                var origTitleS = (object.movie.original_name || object.movie.original_title || movieTitle || '');
+                items.forEach(function (ep, epIdx) {
+                    // Hash каждой серии индивидуален (формула lampac):
+                    // [season_number, ':' если season>10, episode_number, original_title]
                     var sNum = parseInt(ep.season_id || season.id, 10) || 0;
                     var eNum = parseInt(ep.episode_id || ep.name, 10) || 0;
-                    var hash = strHash([sNum, sNum > 10 ? ':' : '', eNum, origTitle].join(''));
+                    var hash = strHash([sNum, sNum > 10 ? ':' : '', eNum, origTitleS].join(''));
                     var card = makePrestigeCard({
                         title: ep.name,
                         time: episodeRuntime,
@@ -968,7 +1086,7 @@
                         tagline: tagline
                     });
                     var tl = card.data('timeline');
-                    card.on('hover:enter', function () { playVoice(info, voice, season, ep, tl); });
+                    card.on('hover:enter', function () { playSeries(info, voice, season, items, epIdx); });
                     card.on('hover:focus', function (e) {
                         try { scroll.update($(e.target), true); } catch (er) {}
                     });
@@ -978,18 +1096,23 @@
                     html.append('<div style="padding:1em;color:#ccc">Без серий в этом сезоне</div>');
                 }
             } else {
-                // Фильм: по одной prestige-карточке на каждую озвучку
-                info.voice.forEach(function (voice, idx) {
-                    // Фильм: hash = Lampa.Utils.hash(original_title) — именно так Lampa ищет прогресс
-                    // на карточке фильма (функция выше в lampa.app.min.js: Timeline.view(Utils.hash([data.original_title].join(''))).
-                    // Используем тот же hash для всех озвучек — так все карточки будут синхронизированы
-                    // с тем прогрессом, что показан на общей TMDB карточке фильма.
+                // Фильм: ОДНА карточка фильма. Все озвучки уходят в плеер как playlist —
+                // в плеере кнопкой плейлиста можно переключить озвучку.
+                (function () {
                     var origTitle = (object.movie.original_title || object.movie.original_name || movieTitle || '');
                     var hash = strHash(origTitle);
+                    var defIdx = pickDefaultVoiceIdx(info.voice);
+                    var defVoice = info.voice[defIdx] || info.voice[0] || { name: '—' };
+                    var infoLine = meta.slice();
+                    if (info.voice.length > 1) {
+                        infoLine.push((info.voice.length) + ' озвучек');
+                    } else if (defVoice.name) {
+                        infoLine.push(defVoice.name);
+                    }
                     var card = makePrestigeCard({
-                        title: voice.name,
+                        title: movieTitle,
                         time: movieRuntime,
-                        info: meta,
+                        info: infoLine,
                         quality: qualityLabel,
                         hash: hash,
                         poster: poster,
@@ -997,14 +1120,13 @@
                     });
                     var tl = card.data('timeline');
                     card.on('hover:enter', function () {
-                        state.choice.voice = idx;
-                        playVoice(info, voice, null, null, tl);
+                        playFilm(info, defIdx);
                     });
                     card.on('hover:focus', function (e) {
                         try { scroll.update($(e.target), true); } catch (er) {}
                     });
                     html.append(card);
-                });
+                })();
                 if (!info.voice.length) {
                     html.append('<div style="padding:1em;color:#ccc">Нет доступных озвучек</div>');
                 }
