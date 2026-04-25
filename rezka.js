@@ -21,7 +21,7 @@
      * ==================================================== */
     var manifest = {
         type: 'video',
-        version: '1.0.2',
+        version: '1.0.3',
         name: 'HDREZKA',
         description: 'Просмотр фильмов и сериалов с HDREZKA по личному аккаунту',
         component: 'rezka_online'
@@ -104,16 +104,6 @@
         return p + url;
     }
 
-    /**
-     * Public CORS proxies tried when the user has not configured one
-     * and when direct request hits a network error in browser context.
-     */
-    var FALLBACK_PROXIES = [
-        'https://cors.cfhttp.top/',
-        'https://api.allorigins.win/raw?url=',
-        'https://corsproxy.io/?'
-    ];
-
     function viaProxy(prefix, url) {
         if (prefix.indexOf('?url=') !== -1 || prefix.slice(-1) === '?') {
             return prefix + encodeURIComponent(url);
@@ -194,60 +184,79 @@
 
     /* ====================================================
      *  Auth: login to HDREZKA
-     *  Используем Lampa.Reguest — в Android-билдах он идёт
-     *  через нативный стек (без CORS), в браузере — fallback на прокси.
+     *  Ключевые правки в v1.0.3:
+     *  — network["native"] (обходит CORS в Android-Lampa) вместо .silent
+     *  — Без запрещённых браузером заголовков (Referer/User-Agent)
+     *  — withCredentials: true чтобы cookie от ajax/login попадали в document.cookie
+     *  — Защита от повторных кликов
      * ==================================================== */
+    var _authInProgress = false;
+
     function authenticate(login, password, cb) {
+        if (_authInProgress) {
+            console.log('REZKA', 'login already in progress, ignoring duplicate click');
+            return;
+        }
+        _authInProgress = true;
+        var done = function (ok, msg) { _authInProgress = false; cb(ok, msg); };
+
         var post = 'login_name=' + encodeURIComponent(login) +
                    '&login_password=' + encodeURIComponent(password) +
                    '&login_not_save=0';
 
         var userProxy = (Lampa.Storage.get(STORAGE.proxy) || '').trim();
-        var attemptedProxies = userProxy
-            ? [userProxy.endsWith('/') ? userProxy : userProxy + '/']
-            : [''].concat(FALLBACK_PROXIES); // сначала прямой, потом прокси
+        // Попытки: 1) прямой, 2) пользовательский прокси (если есть)
+        var attempts = [''];
+        if (userProxy) {
+            attempts.push(userProxy.slice(-1) === '/' ? userProxy : userProxy + '/');
+        }
 
         function tryNext(idx) {
-            if (idx >= attemptedProxies.length) {
+            if (idx >= attempts.length) {
                 Lampa.Storage.set(STORAGE.status, 'error:network');
-                return cb(false, 'Сетевая ошибка — попробуйте указать CORS-прокси в настройках');
+                return done(false, 'Сетевая ошибка. Используйте вход по Cookie (введите вручную)');
             }
-            var prefix = attemptedProxies[idx];
+            var prefix = attempts[idx];
             var fullUrl = getDomain() + '/ajax/login/?t=' + Date.now();
             var url = prefix ? viaProxy(prefix, fullUrl) : fullUrl;
 
-            console.log('REZKA', 'login attempt #' + idx + ' via', prefix || 'direct');
+            console.log('REZKA', 'login attempt #' + idx + ' via', prefix || 'direct', 'url=', url);
 
             var net = new Lampa.Reguest();
             net.timeout(15000);
-            net.silent(url, function (response) {
-                // success callback
-                handleResponse(response, cb);
+
+            // network["native"] = нативный сетевой стек Android (обходит CORS),
+            // или fallback на .silent в браузере.
+            var fn = (typeof net['native'] === 'function') ? net['native'] : net.silent;
+            fn.call(net, url, function (response) {
+                console.log('REZKA', 'login response:', JSON.stringify(response).slice(0, 200));
+                handleResponse(response);
             }, function (xhr, status) {
-                // error callback — пробуем следующий прокси
                 console.log('REZKA', 'login error via', prefix || 'direct', '→ status', status);
                 tryNext(idx + 1);
             }, post, {
-                dataType: 'text',
+                dataType: 'json',
+                withCredentials: true,
                 headers: {
                     'Content-Type': 'application/x-www-form-urlencoded',
-                    'X-Requested-With': 'XMLHttpRequest',
-                    'Referer': getDomain() + '/'
+                    'X-Requested-With': 'XMLHttpRequest'
                 }
             });
         }
 
-        function handleResponse(response, cb) {
+        function handleResponse(response) {
             var ok = false, msg = '';
             try {
-                var text = (typeof response === 'string') ? response : (response && response.responseText) || JSON.stringify(response);
-                var json = (typeof response === 'object' && response !== null && 'success' in response)
-                    ? response
-                    : JSON.parse(text);
+                var json;
+                if (typeof response === 'object' && response !== null) {
+                    json = response;
+                } else {
+                    json = JSON.parse(String(response));
+                }
                 ok = !!json.success;
                 msg = json.message || json.log || '';
             } catch (e) {
-                msg = 'Некорректный ответ сервера';
+                msg = 'Некорректный ответ сервера: ' + (typeof response).slice(0, 30);
             }
 
             if (ok) {
@@ -258,14 +267,31 @@
                     .join('; ');
                 Lampa.Storage.set(STORAGE.cookie, dle);
                 Lampa.Storage.set(STORAGE.status, 'logged');
-                cb(true, 'Успешный вход');
+                done(true, 'Успешный вход' + (dle ? '' : ' (cookie сохранён браузером)'));
             } else {
                 Lampa.Storage.set(STORAGE.status, 'error:' + (msg || 'login failed'));
-                cb(false, msg || 'Не удалось войти (проверьте логин/пароль)');
+                done(false, msg || 'Не удалось войти (проверьте логин/пароль)');
             }
         }
 
         tryNext(0);
+    }
+
+    /**
+     * Ручной вход по cookie-строке.
+     * Пользователь вставляет 'dle_user_id=...; dle_password=...' из браузера.
+     */
+    function applyManualCookie(cookieStr, cb) {
+        if (!cookieStr || !/dle_user_id=/.test(cookieStr) || !/dle_password=/.test(cookieStr)) {
+            return cb(false, 'Строка должна содержать dle_user_id=... и dle_password=...');
+        }
+        // Нормализуем
+        var dle = cookieStr.split(';').map(function (s) { return s.trim(); })
+            .filter(function (s) { return /^dle_(user_id|password|hash|forum_sessions)=/.test(s); })
+            .join('; ');
+        Lampa.Storage.set(STORAGE.cookie, dle);
+        Lampa.Storage.set(STORAGE.status, 'logged');
+        cb(true, 'Сессия сохранена (вход по cookie)');
     }
 
     function logout() {
@@ -789,6 +815,28 @@
                 authenticate(login, pwd, function (ok, msg) {
                     Lampa.Noty.show((ok ? '✓ ' : '✗ ') + msg);
                     // refresh description
+                    $('[data-name="rezka_login_button"] .settings-param__descr').text(statusLabel());
+                });
+            }
+        });
+
+        Lampa.SettingsApi.addParam({
+            component: 'rezka',
+            param: { name: STORAGE.cookie, type: 'input', values: '', default: '' },
+            field: {
+                name: 'Cookie (ручной вход)',
+                description: 'Если кнопка «Войти» не работает — вставьте cookie из браузера: dle_user_id=...; dle_password=...'
+            }
+        });
+
+        Lampa.SettingsApi.addParam({
+            component: 'rezka',
+            param: { name: 'rezka_apply_cookie_button', type: 'trigger' },
+            field: { name: 'Применить cookie', description: 'Активирует введённую строку cookie как активную сессию' },
+            onChange: function () {
+                var ck = (Lampa.Storage.get(STORAGE.cookie) || '').trim();
+                applyManualCookie(ck, function (ok, msg) {
+                    Lampa.Noty.show((ok ? '✓ ' : '✗ ') + msg);
                     $('[data-name="rezka_login_button"] .settings-param__descr').text(statusLabel());
                 });
             }
