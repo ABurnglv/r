@@ -21,7 +21,7 @@
      * ==================================================== */
     var manifest = {
         type: 'video',
-        version: '1.0.12',
+        version: '1.0.13',
         name: 'HDREZKA',
         description: 'Просмотр фильмов и сериалов с HDREZKA по личному аккаунту',
         component: 'rezka_online'
@@ -629,39 +629,43 @@
                    '&action=get_movie';
         }
 
-        try {
-            var xhr = new XMLHttpRequest();
-            xhr.open('POST', url, true);
-            xhr.setRequestHeader('Content-Type', 'application/x-www-form-urlencoded');
-            xhr.setRequestHeader('X-Requested-With', 'XMLHttpRequest');
-            xhr.setRequestHeader('Referer', getDomain() + '/');
-            xhr.withCredentials = true;
-            xhr.timeout = 15000;
-            xhr.onload = function () {
-                try {
-                    var json = JSON.parse(xhr.responseText);
-                    if (!json.success) { err && err(json.message || 'Сервер вернул ошибку'); return; }
-                    var decoded = decodeTrash(json.url);
-                    var items = parsePlaylist(decoded);
-                    if (!items.length) { err && err('Пустой плейлист'); return; }
-                    var qualities = {};
-                    items.forEach(function (it) { qualities[it.label] = it.file; });
-                    if (json.premium_content) {
-                        // premium URLs are dummies for free accounts
-                        // but we still try to play in case the user has premium
-                    }
-                    cb({
-                        title: '',
-                        file: items[items.length - 1].file, // best (last)
-                        quality: qualities,
-                        subtitles: parseSubtitles(json.subtitle)
-                    });
-                } catch (e) { err && err('Не удалось разобрать ответ'); }
-            };
-            xhr.onerror = function () { err && err('Сетевая ошибка'); };
-            xhr.ontimeout = function () { err && err('Таймаут'); };
-            xhr.send(post);
-        } catch (e) { err && err(e.message); }
+        // Используем общий request() helper — он умеет network.native (Android, обходит CORS,
+        // подставляет ручные cookies). XMLHttpRequest напрямую не работает: CORS блокирует
+        // запрос, withCredentials не подставит наш сохранённый dle_user_id.
+        request({
+            url: url,
+            post: post,
+            dataType: 'text',
+            headers: {
+                'Content-Type': 'application/x-www-form-urlencoded',
+                'X-Requested-With': 'XMLHttpRequest'
+            }
+        }, function (resp) {
+            try {
+                var json = typeof resp === 'string' ? JSON.parse(resp) : resp;
+                if (!json || !json.success) {
+                    err && err((json && json.message) || 'Сервер вернул ошибку');
+                    return;
+                }
+                var decoded = decodeTrash(json.url);
+                var items = parsePlaylist(decoded);
+                if (!items.length) { err && err('Пустой плейлист'); return; }
+                var qualities = {};
+                items.forEach(function (it) { qualities[it.label] = it.file; });
+                cb({
+                    title: '',
+                    file: items[items.length - 1].file, // лучшее (последнее) качество
+                    quality: qualities,
+                    subtitles: parseSubtitles(json.subtitle)
+                });
+            } catch (e) {
+                console.log('REZKA', 'getStream parse error', e && e.message, resp);
+                err && err('Не удалось разобрать ответ');
+            }
+        }, function (xhr, msg) {
+            console.log('REZKA', 'getStream network error', msg, xhr && xhr.status);
+            err && err('Сетевая ошибка' + (msg ? ': ' + msg : ''));
+        });
     }
 
     function parseSubtitles(s) {
@@ -780,42 +784,116 @@
                 });
         }
 
+        // Простой строковый hash (Lampa.Utils.hash отсутствует в этой сборке Lampa)
+        function strHash(str) {
+            var h = 0, s = String(str || '');
+            for (var i = 0; i < s.length; i++) {
+                h = ((h << 5) - h) + s.charCodeAt(i);
+                h |= 0;
+            }
+            return Math.abs(h).toString(36);
+        }
+
+        // Создаёт prestige-карточку в стиле lampac (постер + таймлайн + инфо + качество)
+        function makePrestigeCard(opts) {
+            // opts: {title, time, info[], quality, hash, poster}
+            var infoLine = (opts.info || []).filter(Boolean).map(escapeHTML)
+                .join('<span class="rezka-prestige-split">●</span>');
+            var card = $(Lampa.Template.get('rezka_prestige_full', {
+                title:   escapeHTML(opts.title || ''),
+                time:    escapeHTML(opts.time  || ''),
+                info:    infoLine,
+                quality: escapeHTML(opts.quality || '')
+            }));
+            // постер
+            var imgWrap = card.find('.rezka-prestige__img');
+            var img = imgWrap.find('img');
+            if (opts.poster) {
+                img.on('load', function () { imgWrap.addClass('rezka-prestige__img--loaded'); });
+                img.on('error', function () { img.attr('src', ''); imgWrap.css('background', '#333'); });
+                img.attr('src', opts.poster);
+            }
+            // timeline (прогресс просмотра)
+            try {
+                if (opts.hash && Lampa.Timeline) {
+                    var view = Lampa.Timeline.view(opts.hash);
+                    card.find('.rezka-prestige__timeline').append(Lampa.Timeline.render(view));
+                }
+            } catch (e) { /* timeline optional */ }
+            return card;
+        }
+
+        function getPoster() {
+            var m = object.movie || {};
+            var p = m.background_image || m.img;
+            if (p) return p;
+            if (m.poster_path) return 'https://image.tmdb.org/t/p/w300' + m.poster_path;
+            if (m.backdrop_path) return 'https://image.tmdb.org/t/p/w300' + m.backdrop_path;
+            return '';
+        }
+
+        function movieMeta() {
+            var m = object.movie || {};
+            var year = (m.release_date || m.first_air_date || '').slice(0, 4);
+            var rate = m.vote_average ? Number(m.vote_average).toFixed(1) : '';
+            var info = [];
+            if (year) info.push(year);
+            if (rate) info.push('★ ' + rate);
+            if (m.original_title && m.original_title !== m.title) info.push(m.original_title);
+            else if (m.original_name && m.original_name !== m.name) info.push(m.original_name);
+            return info;
+        }
+
         function buildList() {
             html.empty();
             if (!state.info) return;
             var info = state.info;
+            var poster = getPoster();
+            var movieTitle = (object.movie.title || object.movie.name || '');
+            var meta = movieMeta();
 
-            // Для сериала — выбранная озвучка + список серий
-            // Для фильма   — список всех озвучек (каждая = своя карточка)
             if (info.is_series) {
+                // Сериал: выбранная озвучка + сезон → список серий
                 var voice = info.voice[state.choice.voice] || info.voice[0];
                 var season = info.season[state.choice.season];
                 var items = season ? info.episode.filter(function (e) {
                     return String(e.season_id) === String(season.id);
                 }) : [];
                 items.forEach(function (ep) {
-                    var item = $('<div class="online selector"><div class="online__title">' +
-                        escapeHTML(ep.name) + '</div><div class="online__quality">' +
-                        escapeHTML(voice.name) + '</div></div>');
-                    item.on('hover:enter', function () {
-                        playVoice(info, voice, season, ep);
+                    var num = (ep.name.match(/\d+/) || [''])[0];
+                    var card = makePrestigeCard({
+                        title: ep.name,
+                        time: '',
+                        info: [voice.name, season.name],
+                        quality: '',
+                        hash: strHash([season.id, ep.episode_id, movieTitle].join('-')),
+                        poster: poster
                     });
-                    html.append(item);
+                    card.on('hover:enter', function () { playVoice(info, voice, season, ep); });
+                    html.append(card);
                 });
+                if (!items.length) {
+                    html.append('<div style="padding:1em;color:#ccc">Без серий в этом сезоне</div>');
+                }
             } else {
-                // Фильм — одна карточка на каждую озвучку
+                // Фильм: по одной prestige-карточке на каждую озвучку
                 info.voice.forEach(function (voice, idx) {
-                    var item = $('<div class="online selector"><div class="online__title">' +
-                        escapeHTML(voice.name) +
-                        '</div><div class="online__quality">Фильм — нажмите OK</div></div>');
-                    item.on('hover:enter', function () {
+                    var card = makePrestigeCard({
+                        title: voice.name,
+                        time: '',
+                        info: meta,
+                        quality: '',
+                        hash: strHash([info.film_id, voice.id, voice.name].join('-')),
+                        poster: poster
+                    });
+                    card.on('hover:enter', function () {
                         state.choice.voice = idx;
                         playVoice(info, voice, null, null);
                     });
-                    html.append(item);
+                    html.append(card);
                 });
                 if (!info.voice.length) {
-                    html.append('<div class="online__nothing" style="padding:1em;color:#ccc">Нет доступных озвучек</div>');
+                    html.append('<div style="padding:1em;color:#ccc">Нет доступных озвучек</div>');
                 }
             }
             scroll.append(html);
@@ -907,6 +985,55 @@
     /* ====================================================
      *  Register component & online source button
      * ==================================================== */
+    /* ====================================================
+     *  Prestige template & CSS — оформление карточек
+     *  в стиле lampac/online-prestige (постер + таймлайн + инфо)
+     * ==================================================== */
+    function registerPrestigeStyles() {
+        if (window.rezka_prestige_registered) return;
+        window.rezka_prestige_registered = true;
+        try {
+            Lampa.Template.add('rezka_prestige_css', '<style>'
+                + '.rezka-prestige{position:relative;border-radius:.3em;background-color:rgba(0,0,0,0.3);display:flex;}'
+                + '.rezka-prestige+.rezka-prestige{margin-top:1.5em}'
+                + '.rezka-prestige__img{position:relative;width:13em;flex-shrink:0;min-height:8.2em;border-radius:.3em;overflow:hidden;background:#222;}'
+                + '.rezka-prestige__img>img{position:absolute;top:0;left:0;width:100%;height:100%;object-fit:cover;opacity:0;transition:opacity .3s;}'
+                + '.rezka-prestige__img--loaded>img{opacity:1}'
+                + '.rezka-prestige__body{padding:1.2em;line-height:1.3;flex-grow:1;position:relative}'
+                + '.rezka-prestige__head{display:flex;justify-content:space-between;align-items:center}'
+                + '.rezka-prestige__title{font-size:1.7em;overflow:hidden;text-overflow:ellipsis;display:-webkit-box;-webkit-line-clamp:1;-webkit-box-orient:vertical}'
+                + '.rezka-prestige__time{padding-left:2em;color:rgba(255,255,255,0.6)}'
+                + '.rezka-prestige__timeline{margin:.8em 0}'
+                + '.rezka-prestige__timeline>.time-line{display:block !important}'
+                + '.rezka-prestige__footer{display:flex;justify-content:space-between;align-items:center}'
+                + '.rezka-prestige__info{display:flex;align-items:center;color:rgba(255,255,255,0.7);font-size:.9em}'
+                + '.rezka-prestige__info>*{overflow:hidden;text-overflow:ellipsis;display:-webkit-box;-webkit-line-clamp:1;-webkit-box-orient:vertical}'
+                + '.rezka-prestige__quality{padding-left:1em;white-space:nowrap;color:#fff;font-weight:600}'
+                + '.rezka-prestige-split{font-size:.8em;margin:0 1em;flex-shrink:0;opacity:.5}'
+                + '.rezka-prestige.focus::after{content:"";position:absolute;top:-0.6em;left:-0.6em;right:-0.6em;bottom:-0.6em;border-radius:.7em;border:solid .3em #fff;z-index:-1;pointer-events:none}'
+                + '.rezka-prestige__head-info{padding:.6em 1em;background:rgba(0,0,0,0.4);border-radius:.3em;margin-bottom:1em;font-size:.95em;color:rgba(255,255,255,0.85)}'
+                + '@media screen and (max-width:480px){.rezka-prestige__img{width:7em;min-height:6em}.rezka-prestige__title{font-size:1.4em}.rezka-prestige__body{padding:.8em 1.2em}}'
+                + '</style>');
+            Lampa.Template.add('rezka_prestige_full',
+                '<div class="rezka-prestige selector">'
+              + '<div class="rezka-prestige__img"><img alt=""></div>'
+              + '<div class="rezka-prestige__body">'
+              + '<div class="rezka-prestige__head">'
+              + '<div class="rezka-prestige__title">{title}</div>'
+              + '<div class="rezka-prestige__time">{time}</div>'
+              + '</div>'
+              + '<div class="rezka-prestige__timeline"></div>'
+              + '<div class="rezka-prestige__footer">'
+              + '<div class="rezka-prestige__info">{info}</div>'
+              + '<div class="rezka-prestige__quality">{quality}</div>'
+              + '</div>'
+              + '</div>'
+              + '</div>');
+            // встраиваем CSS в <head>
+            $('body').append(Lampa.Template.get('rezka_prestige_css', {}, true));
+        } catch (e) { console.log('REZKA', 'prestige register fail', e && e.message); }
+    }
+
     function registerComponent() {
         if (Lampa.Component && Lampa.Component.add) {
             Lampa.Component.add('rezka_online', component);
@@ -1213,6 +1340,7 @@
         try {
             ensureDefaults();
             registerManifest();
+            registerPrestigeStyles();
             registerComponent();
             addSettings();
             addOnlineSource();
