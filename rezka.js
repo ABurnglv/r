@@ -21,7 +21,7 @@
      * ==================================================== */
     var manifest = {
         type: 'video',
-        version: '1.0.13',
+        version: '1.0.14',
         name: 'HDREZKA',
         description: 'Просмотр фильмов и сериалов с HDREZKA по личному аккаунту',
         component: 'rezka_online'
@@ -694,14 +694,19 @@
 
         this.create = function () {
             console.log('REZKA', 'component.create called');
-            scroll.minus();
+
+            scroll.body().addClass('torrent-list');
             files.appendFiles(scroll.render());
             files.appendHead(filter.render());
+            // вычитаем высоту шапки (фильтра) из висимой области scroll — иначе список не скроллится
+            try { scroll.minus(files.render().find('.explorer__files-head')); }
+            catch (e) { try { scroll.minus(); } catch (e2) {} }
 
             filter.onSearch = function (value) {
                 Lampa.Activity.replace({ search: value, clarification: true });
             };
             filter.onBack = function () { self.start(); };
+            try { if (filter.addButtonBack) filter.addButtonBack(); } catch (e) {}
 
             // Lampa НЕ вызывает initialize() автоматически — вызываем сами
             try { this.initialize(); } catch (err) {
@@ -759,7 +764,7 @@
             scroll.append(html);
         }
 
-        function playVoice(info, voice, season, episode) {
+        function playVoice(info, voice, season, episode, timeline) {
             Lampa.Modal.open({
                 title: 'HDREZKA',
                 html: $('<div style="padding:1em">Получаем ссылку (' + escapeHTML(voice.name) + ')…</div>'),
@@ -775,6 +780,8 @@
                         quality: data.quality,
                         subtitles: data.subtitles
                     };
+                    // Передаём timeline — Lampa.Player будет сам писать прогресс по этому hash
+                    if (timeline) pl.timeline = timeline;
                     Lampa.Player.play(pl);
                     Lampa.Player.playlist([pl]);
                 },
@@ -813,10 +820,13 @@
                 img.on('error', function () { img.attr('src', ''); imgWrap.css('background', '#333'); });
                 img.attr('src', opts.poster);
             }
-            // timeline (прогресс просмотра)
+            // берём существующую Timeline view (или создаём) — привязываем к card.timeline,
+            // чтобы в playVoice() передать этот же объект в Player.play({timeline: ...}) —
+            // Lampa.Player будет сам обновлять прогресс в Storage по этому hash.
             try {
                 if (opts.hash && Lampa.Timeline) {
                     var view = Lampa.Timeline.view(opts.hash);
+                    card.data('timeline', view);
                     card.find('.rezka-prestige__timeline').append(Lampa.Timeline.render(view));
                 }
             } catch (e) { /* timeline optional */ }
@@ -860,16 +870,22 @@
                     return String(e.season_id) === String(season.id);
                 }) : [];
                 items.forEach(function (ep) {
-                    var num = (ep.name.match(/\d+/) || [''])[0];
+                    // hash совпадает с формулой lampac — будет синхрон прогресса между плагинами
+                    var origTitle = (object.movie.original_name || object.movie.original_title || movieTitle || '');
+                    var hash = strHash([season.name || season.id, season.id > 10 ? ':' : '', ep.name, origTitle].join(''));
                     var card = makePrestigeCard({
                         title: ep.name,
                         time: '',
                         info: [voice.name, season.name],
                         quality: '',
-                        hash: strHash([season.id, ep.episode_id, movieTitle].join('-')),
+                        hash: hash,
                         poster: poster
                     });
-                    card.on('hover:enter', function () { playVoice(info, voice, season, ep); });
+                    var tl = card.data('timeline');
+                    card.on('hover:enter', function () { playVoice(info, voice, season, ep, tl); });
+                    card.on('hover:focus', function (e) {
+                        try { scroll.update($(e.target), true); } catch (er) {}
+                    });
                     html.append(card);
                 });
                 if (!items.length) {
@@ -878,17 +894,25 @@
             } else {
                 // Фильм: по одной prestige-карточке на каждую озвучку
                 info.voice.forEach(function (voice, idx) {
+                    // Для фильма — hash привязываем к original_title (как лампак) плюс озвучка,
+                    // чтобы у каждой озвучки был свой прогресс просмотра.
+                    var origTitle = (object.movie.original_title || object.movie.original_name || movieTitle || '');
+                    var hash = strHash(origTitle + '|' + voice.name);
                     var card = makePrestigeCard({
                         title: voice.name,
                         time: '',
                         info: meta,
                         quality: '',
-                        hash: strHash([info.film_id, voice.id, voice.name].join('-')),
+                        hash: hash,
                         poster: poster
                     });
+                    var tl = card.data('timeline');
                     card.on('hover:enter', function () {
                         state.choice.voice = idx;
-                        playVoice(info, voice, null, null);
+                        playVoice(info, voice, null, null, tl);
+                    });
+                    card.on('hover:focus', function (e) {
+                        try { scroll.update($(e.target), true); } catch (er) {}
                     });
                     html.append(card);
                 });
@@ -903,45 +927,55 @@
         function buildFilter() {
             if (!state.info) return;
             var info = state.info;
-            // Для фильма фильтр по озвучке не нужен — они все в списке ниже.
-            var rows = [];
+            // Правый блок в фильтре = «Источник [HDRezka]» (sort)
+            try { filter.set('sort', [{ title: 'HDRezka', selected: true, source: 'rezka' }]); } catch (e) {}
+            try { filter.chosen('sort', ['HDRezka']); } catch (e) {}
+
+            // Левый блок = «Фильтр» (для фильма — одна «Сброс»-опция, для сериала — перевод/сезон)
+            var select = [];
+            var chosen = [];
             if (info.is_series) {
-                var vName = (info.voice[state.choice.voice] || info.voice[0] || {}).name || '—';
-                rows.push({ title: 'Перевод', subtitle: vName, stype: 'voice' });
-                if (info.season.length) {
+                var voiceItems = info.voice.map(function (v, i) {
+                    return { title: v.name, selected: i === state.choice.voice, index: i };
+                });
+                if (voiceItems.length) {
+                    var vName = (info.voice[state.choice.voice] || info.voice[0] || {}).name || '—';
+                    select.push({ title: 'Перевод', subtitle: vName, items: voiceItems, stype: 'voice' });
+                    chosen.push('Перевод: ' + vName);
+                }
+                var seasonItems = info.season.map(function (s, i) {
+                    return { title: s.name, selected: i === state.choice.season, index: i };
+                });
+                if (seasonItems.length) {
                     var sName = (info.season[state.choice.season] || {}).name || '—';
-                    rows.push({ title: 'Сезон', subtitle: sName, stype: 'season' });
+                    select.push({ title: 'Сезон', subtitle: sName, items: seasonItems, stype: 'season' });
+                    chosen.push('Сезон: ' + sName);
                 }
+            } else {
+                // Для фильма — все озвучки видны в списке, фильтр оставляем пустым (но плашка видна)
+                chosen.push('Все озвучки');
             }
-            try { filter.set('filter', rows); } catch (e) {}
-            try { filter.set('sort', []); } catch (e) {}
+            select.push({ title: 'Сбросить', reset: true });
+            try { filter.set('filter', select); } catch (e) {}
+            try { filter.chosen('filter', chosen); } catch (e) {}
             filter.onSelect = function (type, a, b) {
-                if (a.stype === 'voice') {
-                    var names = info.voice.map(function (v) { return v.name; });
-                    Lampa.Select.show({
-                        title: 'Перевод',
-                        items: names.map(function (n, i) { return { title: n, index: i }; }),
-                        onBack: function () { Lampa.Controller.toggle('content'); },
-                        onSelect: function (s) {
-                            state.choice.voice = s.index;
-                            buildFilter();
-                            buildList();
-                            Lampa.Controller.toggle('content');
-                        }
-                    });
-                } else if (a.stype === 'season') {
-                    Lampa.Select.show({
-                        title: 'Сезон',
-                        items: info.season.map(function (s, i) { return { title: s.name, index: i }; }),
-                        onBack: function () { Lampa.Controller.toggle('content'); },
-                        onSelect: function (s) {
-                            state.choice.season = s.index;
-                            buildFilter();
-                            buildList();
-                            Lampa.Controller.toggle('content');
-                        }
-                    });
+                if (type !== 'filter') return;
+                if (a.reset) {
+                    state.choice.voice = 0;
+                    state.choice.season = 0;
+                    setTimeout(Lampa.Select.close, 10);
+                    buildFilter();
+                    buildList();
+                    return;
                 }
+                if (a.stype === 'voice' && b && typeof b.index !== 'undefined') {
+                    state.choice.voice = b.index;
+                } else if (a.stype === 'season' && b && typeof b.index !== 'undefined') {
+                    state.choice.season = b.index;
+                }
+                setTimeout(Lampa.Select.close, 10);
+                buildFilter();
+                buildList();
             };
         }
 
