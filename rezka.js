@@ -21,7 +21,7 @@
      * ==================================================== */
     var manifest = {
         type: 'video',
-        version: '1.0.11',
+        version: '1.0.12',
         name: 'HDREZKA',
         description: 'Просмотр фильмов и сериалов с HDREZKA по личному аккаунту',
         component: 'rezka_online'
@@ -524,19 +524,54 @@
                         });
                     });
                 }
+                // На части страниц (НАПРИМЕР rezka.fi) блока b-translator__list нет —
+                // вместо этого переводы лежат в <td>: <a ...>Дубляж</a>, <a ...>RS</a>, ...
+                // Каждая ссылка имеет атрибут data-translator_id (или onclick="...translator_id...").
                 if (!info.voice.length) {
-                    var defName = '';
-                    var dn = str.match(/<h2>В переводе<\/h2>:[\s\S]*?<td[^>]*>(.*?)<\/td>/);
+                    var dn = str.match(/<h2>В переводе<\/h2>:[\s\S]*?<td[^>]*>([\s\S]*?)<\/td>/);
                     if (dn) {
                         var dd = document.createElement('div'); dd.innerHTML = dn[1];
-                        defName = (dd.textContent || '').trim();
+                        // 1) пробуем выдернуть ссылки
+                        var anchors = dd.querySelectorAll('a');
+                        if (anchors.length) {
+                            anchors.forEach(function (a) {
+                                var name = (a.getAttribute('title') || a.textContent || '').trim();
+                                if (!name) return;
+                                // id может быть в data-translator_id, data-id, или в onclick="...,XXX,..."
+                                var id = a.getAttribute('data-translator_id') || a.getAttribute('data-id') || '';
+                                if (!id) {
+                                    var oc = a.getAttribute('onclick') || a.getAttribute('data-onclick') || '';
+                                    var im = oc.match(/(\d{3,})/);
+                                    if (im) id = im[1];
+                                }
+                                info.voice.push({
+                                    name: name,
+                                    id: id || defVoiceId,
+                                    is_camrip: camrip, is_ads: ads, is_director: director
+                                });
+                            });
+                        }
+                        // 2) fallback — разобрать текстом через запятую
+                        if (!info.voice.length) {
+                            var raw = (dd.textContent || '').trim();
+                            raw.split(/,\s*/).forEach(function (n) {
+                                n = n.trim().replace(/\s*\(\+субтитры\)\s*$/i, '');
+                                if (n) info.voice.push({
+                                    name: n, id: defVoiceId,
+                                    is_camrip: camrip, is_ads: ads, is_director: director
+                                });
+                            });
+                        }
                     }
+                }
+                if (!info.voice.length) {
                     info.voice.push({
-                        name: defName || 'Оригинал',
+                        name: 'Оригинал',
                         id: defVoiceId,
                         is_camrip: camrip, is_ads: ads, is_director: director
                     });
                 }
+                console.log('REZKA', 'parsed voices:', info.voice.length, info.voice.map(function(v){return v.name+'#'+v.id;}).join(' | '));
 
                 if (info.is_series) {
                     var sm = str.match(/<ul[^>]+class="b-simple_seasons__list"[\s\S]*?<\/ul>/);
@@ -720,56 +755,69 @@
             scroll.append(html);
         }
 
+        function playVoice(info, voice, season, episode) {
+            Lampa.Modal.open({
+                title: 'HDREZKA',
+                html: $('<div style="padding:1em">Получаем ссылку (' + escapeHTML(voice.name) + ')…</div>'),
+                size: 'small',
+                onBack: function () { Lampa.Modal.close(); Lampa.Controller.toggle('content'); }
+            });
+            getStream(info, voice, season, episode,
+                function (data) {
+                    Lampa.Modal.close();
+                    var pl = {
+                        url: data.file,
+                        title: (object.movie.title || object.movie.name || '') + ' — ' + voice.name,
+                        quality: data.quality,
+                        subtitles: data.subtitles
+                    };
+                    Lampa.Player.play(pl);
+                    Lampa.Player.playlist([pl]);
+                },
+                function (msg) {
+                    Lampa.Modal.close();
+                    Lampa.Noty.show('HDREZKA: ' + msg);
+                });
+        }
+
         function buildList() {
             html.empty();
             if (!state.info) return;
             var info = state.info;
 
-            var voice = info.voice[state.choice.voice] || info.voice[0];
-            var season = info.season[state.choice.season];
-
-            var items = [];
-            if (info.is_series && season) {
-                items = info.episode.filter(function (e) { return String(e.season_id) === String(season.id); });
-            } else {
-                items = [{ name: 'Смотреть фильм', episode_id: 0, season_id: 0, _movie: true }];
-            }
-
-            items.forEach(function (ep) {
-                var item = $('<div class="online"><div class="online__title">' + escapeHTML(ep.name) +
-                    '</div><div class="online__quality">' + escapeHTML(voice.name) + '</div></div>');
-                item.on('hover:enter', function () {
-                    Lampa.Modal.open({
-                        title: 'HDREZKA',
-                        html: $('<div style="padding:1em">Получаем ссылку…</div>'),
-                        size: 'small',
-                        onBack: function () { Lampa.Modal.close(); Lampa.Controller.toggle('content'); }
+            // Для сериала — выбранная озвучка + список серий
+            // Для фильма   — список всех озвучек (каждая = своя карточка)
+            if (info.is_series) {
+                var voice = info.voice[state.choice.voice] || info.voice[0];
+                var season = info.season[state.choice.season];
+                var items = season ? info.episode.filter(function (e) {
+                    return String(e.season_id) === String(season.id);
+                }) : [];
+                items.forEach(function (ep) {
+                    var item = $('<div class="online selector"><div class="online__title">' +
+                        escapeHTML(ep.name) + '</div><div class="online__quality">' +
+                        escapeHTML(voice.name) + '</div></div>');
+                    item.on('hover:enter', function () {
+                        playVoice(info, voice, season, ep);
                     });
-                    getStream(info, voice,
-                        info.is_series ? season : null,
-                        info.is_series ? ep : null,
-                        function (data) {
-                            Lampa.Modal.close();
-                            Lampa.Player.play({
-                                url: data.file,
-                                title: object.movie.title || object.movie.name || '',
-                                quality: data.quality,
-                                subtitles: data.subtitles
-                            });
-                            Lampa.Player.playlist([{
-                                url: data.file,
-                                title: object.movie.title || object.movie.name || '',
-                                quality: data.quality,
-                                subtitles: data.subtitles
-                            }]);
-                        },
-                        function (msg) {
-                            Lampa.Modal.close();
-                            Lampa.Noty.show('HDREZKA: ' + msg);
-                        });
+                    html.append(item);
                 });
-                html.append(item);
-            });
+            } else {
+                // Фильм — одна карточка на каждую озвучку
+                info.voice.forEach(function (voice, idx) {
+                    var item = $('<div class="online selector"><div class="online__title">' +
+                        escapeHTML(voice.name) +
+                        '</div><div class="online__quality">Фильм — нажмите OK</div></div>');
+                    item.on('hover:enter', function () {
+                        state.choice.voice = idx;
+                        playVoice(info, voice, null, null);
+                    });
+                    html.append(item);
+                });
+                if (!info.voice.length) {
+                    html.append('<div class="online__nothing" style="padding:1em;color:#ccc">Нет доступных озвучек</div>');
+                }
+            }
             scroll.append(html);
             Lampa.Controller.enable('content');
         }
@@ -777,20 +825,44 @@
         function buildFilter() {
             if (!state.info) return;
             var info = state.info;
-            var f = {
-                voice: info.voice.map(function (v) { return v.name; })
-            };
+            // Для фильма фильтр по озвучке не нужен — они все в списке ниже.
+            var rows = [];
             if (info.is_series) {
-                f.season = info.season.map(function (s) { return s.name; });
+                var vName = (info.voice[state.choice.voice] || info.voice[0] || {}).name || '—';
+                rows.push({ title: 'Перевод', subtitle: vName, stype: 'voice' });
+                if (info.season.length) {
+                    var sName = (info.season[state.choice.season] || {}).name || '—';
+                    rows.push({ title: 'Сезон', subtitle: sName, stype: 'season' });
+                }
             }
-            filter.set('filter', Object.keys(f).map(function (key) {
-                return { title: key === 'voice' ? 'Перевод' : 'Сезон', subtitle: f[key][state.choice[key]] || '—', stype: key };
-            }));
+            try { filter.set('filter', rows); } catch (e) {}
+            try { filter.set('sort', []); } catch (e) {}
             filter.onSelect = function (type, a, b) {
-                if (a.stype) {
-                    state.choice[a.stype] = b.index;
-                    buildFilter();
-                    buildList();
+                if (a.stype === 'voice') {
+                    var names = info.voice.map(function (v) { return v.name; });
+                    Lampa.Select.show({
+                        title: 'Перевод',
+                        items: names.map(function (n, i) { return { title: n, index: i }; }),
+                        onBack: function () { Lampa.Controller.toggle('content'); },
+                        onSelect: function (s) {
+                            state.choice.voice = s.index;
+                            buildFilter();
+                            buildList();
+                            Lampa.Controller.toggle('content');
+                        }
+                    });
+                } else if (a.stype === 'season') {
+                    Lampa.Select.show({
+                        title: 'Сезон',
+                        items: info.season.map(function (s, i) { return { title: s.name, index: i }; }),
+                        onBack: function () { Lampa.Controller.toggle('content'); },
+                        onSelect: function (s) {
+                            state.choice.season = s.index;
+                            buildFilter();
+                            buildList();
+                            Lampa.Controller.toggle('content');
+                        }
+                    });
                 }
             };
         }
