@@ -21,7 +21,7 @@
      * ==================================================== */
     var manifest = {
         type: 'video',
-        version: '1.0.9',
+        version: '1.0.10',
         name: 'HDREZKA',
         description: 'Просмотр фильмов и сериалов с HDREZKA по личному аккаунту',
         component: 'rezka_online'
@@ -385,7 +385,27 @@
             .join('; ');
         Lampa.Storage.set(STORAGE.cookie, dle);
         Lampa.Storage.set(STORAGE.status, 'logged');
-        cb(true, 'Сессия сохранена (вход по cookie)');
+
+        // Сразу проверим что сессия действительно работает
+        var net = new Lampa.Reguest();
+        net.timeout(10000);
+        var url = getDomain() + '/?t=' + Date.now();
+        var fn = (typeof net['native'] === 'function' &&
+                  Lampa.Platform && Lampa.Platform.is && Lampa.Platform.is('android'))
+                 ? net['native'] : net.silent;
+        fn.call(net, url, function (html) {
+            var s = String(html || '').slice(0, 30000);
+            var loggedHints = /href="\/(?:logout|user)\/|class="b-user-section|data-uid="\d+"|name="action"\s+value="logout"/i;
+            var loginHints = /<title>\s*Вход\s*<\/title>|id="login_name"|action="\/ajax\/login\/"/i;
+            if (loggedHints.test(s)) cb(true, '🟢 Сессия активна — HDREZKA готова');
+            else if (loginHints.test(s)) cb(false, 'Cookie сохранён, но сервер всё ещё показывает вход. Проверьте dle_user_id/dle_password или возьмите свежие из браузера.');
+            else cb(true, 'Сессия сохранена (статус: ' + s.length + ' байт)');
+        }, function () {
+            cb(true, 'Сессия сохранена (без проверки — сетевая ошибка)');
+        }, false, {
+            dataType: 'text',
+            headers: buildHeaders()
+        });
     }
 
     function logout() {
@@ -944,6 +964,17 @@
                 '<path d="M9 8l6 4-6 4V8z" fill="currentColor"/></svg>'
         });
 
+        // ── Статус сессии ────────────────────────────────────────────
+        Lampa.SettingsApi.addParam({
+            component: 'rezka',
+            param: { name: 'rezka_status_view', type: 'trigger' },
+            field: { name: 'Статус', description: statusLabel() },
+            onChange: function () {
+                $('[data-name="rezka_status_view"] .settings-param__descr').text(statusLabel());
+            }
+        });
+
+        // ── Домен ────────────────────────────────────────────────────
         Lampa.SettingsApi.addParam({
             component: 'rezka',
             param: { name: STORAGE.domain, type: 'input', values: '', default: 'https://rezka.fi' },
@@ -951,10 +982,80 @@
             onChange: function () { Lampa.Storage.set(STORAGE.status, 'guest'); }
         });
 
+        // ── ОСНОВНОЙ путь: вход по Cookie ───────────────────────────
+        Lampa.SettingsApi.addParam({
+            component: 'rezka',
+            param: { name: STORAGE.cookie, type: 'input', values: '', default: '' },
+            field: {
+                name: '🔑 Cookie из браузера (РЕКОМЕНДУЕТСЯ)',
+                description: 'Вставьте: dle_user_id=12345; dle_password=abcd... (см. инструкцию ниже)'
+            }
+        });
+
+        Lampa.SettingsApi.addParam({
+            component: 'rezka',
+            param: { name: 'rezka_apply_cookie_button', type: 'trigger' },
+            field: { name: '✅ Применить cookie', description: 'Сохранить и проверить сессию' },
+            onChange: function () {
+                var ck = (Lampa.Storage.get(STORAGE.cookie) || '').trim();
+                Lampa.Noty.show('Проверяю сессию HDREZKA…');
+                applyManualCookie(ck, function (ok, msg) {
+                    Lampa.Noty.show((ok ? '✓ ' : '✗ ') + msg);
+                    $('[data-name="rezka_status_view"] .settings-param__descr').text(statusLabel());
+                });
+            }
+        });
+
+        Lampa.SettingsApi.addParam({
+            component: 'rezka',
+            param: { name: 'rezka_help_button', type: 'trigger' },
+            field: { name: '📖 Как получить cookie', description: 'Нажмите чтобы показать пошаговую инструкцию' },
+            onChange: function () {
+                var help =
+                    '1) Откройте rezka.fi в Chrome на компьютере и войдите в аккаунт. ' +
+                    '2) Нажмите F12 → Application → Cookies → https://rezka.fi. ' +
+                    '3) Скопируйте значения dle_user_id и dle_password. ' +
+                    '4) Вернитесь в Lampa, в поле выше вставьте: dle_user_id=ВАШ_ID; dle_password=ВАШ_ХЭШ ' +
+                    '5) Нажмите «Применить cookie». Cookie живёт ~6 месяцев.';
+                if (Lampa.Modal && Lampa.Modal.open) {
+                    Lampa.Modal.open({
+                        title: 'Как получить cookie HDREZKA',
+                        html: $('<div style="padding:1em 1.5em;line-height:1.5em;font-size:1.1em">' +
+                                '<p><b>1.</b> Откройте <b>rezka.fi</b> в Chrome/Firefox на компьютере и войдите в аккаунт.</p>' +
+                                '<p><b>2.</b> Нажмите <b>F12</b> → вкладка <b>Application</b> (или <b>Storage</b>) → <b>Cookies</b> → <b>https://rezka.fi</b>.</p>' +
+                                '<p><b>3.</b> Скопируйте значения двух cookies:</p>' +
+                                '<ul style="margin-left:2em"><li><code>dle_user_id</code> (число)</li><li><code>dle_password</code> (длинная строка)</li></ul>' +
+                                '<p><b>4.</b> Вернитесь в Lampa, в поле <b>«🔑 Cookie из браузера»</b> вставьте строку:</p>' +
+                                '<pre style="background:#222;padding:0.6em;border-radius:0.4em">dle_user_id=12345; dle_password=abc123def456</pre>' +
+                                '<p><b>5.</b> Нажмите <b>«✅ Применить cookie»</b>. Статус должен стать 🟢.</p>' +
+                                '<p style="opacity:0.7">Cookie живёт ~6 месяцев — потом повторите шаги 1–4.</p>' +
+                                '</div>'),
+                        size: 'medium',
+                        onBack: function () { Lampa.Modal.close(); Lampa.Controller.toggle('settings_component'); }
+                    });
+                } else {
+                    Lampa.Noty.show(help);
+                }
+            }
+        });
+
+        Lampa.SettingsApi.addParam({
+            component: 'rezka',
+            param: { name: 'rezka_logout_button', type: 'trigger' },
+            field: { name: '🚪 Выйти / очистить сессию', description: 'Удалить сохранённое cookie' },
+            onChange: function () {
+                logout();
+                Lampa.Storage.set(STORAGE.cookie, '');
+                Lampa.Noty.show('Сессия HDREZKA очищена');
+                $('[data-name="rezka_status_view"] .settings-param__descr').text(statusLabel());
+            }
+        });
+
+        // ── Резервный путь: автологин (часто не работает на Android) ──
         Lampa.SettingsApi.addParam({
             component: 'rezka',
             param: { name: STORAGE.login, type: 'input', values: '', default: '' },
-            field: { name: 'Логин / E-mail', description: 'Email или имя пользователя HDREZKA' }
+            field: { name: 'Логин / E-mail (резервный путь)', description: 'Email или имя пользователя HDREZKA' }
         });
 
         Lampa.SettingsApi.addParam({
@@ -966,7 +1067,7 @@
         Lampa.SettingsApi.addParam({
             component: 'rezka',
             param: { name: 'rezka_login_button', type: 'trigger' },
-            field: { name: 'Войти в аккаунт', description: statusLabel() },
+            field: { name: 'Войти автоматически', description: 'На Lampa-Android часто не работает — используйте Cookie выше' },
             onChange: function () {
                 var login = Lampa.Storage.get(STORAGE.login);
                 var pwd   = Lampa.Storage.get(STORAGE.password);
@@ -977,42 +1078,8 @@
                 Lampa.Noty.show('Авторизация на HDREZKA…');
                 authenticate(login, pwd, function (ok, msg) {
                     Lampa.Noty.show((ok ? '✓ ' : '✗ ') + msg);
-                    // refresh description
-                    $('[data-name="rezka_login_button"] .settings-param__descr').text(statusLabel());
+                    $('[data-name="rezka_status_view"] .settings-param__descr').text(statusLabel());
                 });
-            }
-        });
-
-        Lampa.SettingsApi.addParam({
-            component: 'rezka',
-            param: { name: STORAGE.cookie, type: 'input', values: '', default: '' },
-            field: {
-                name: 'Cookie (ручной вход)',
-                description: 'Если кнопка «Войти» не работает — вставьте cookie из браузера: dle_user_id=...; dle_password=...'
-            }
-        });
-
-        Lampa.SettingsApi.addParam({
-            component: 'rezka',
-            param: { name: 'rezka_apply_cookie_button', type: 'trigger' },
-            field: { name: 'Применить cookie', description: 'Активирует введённую строку cookie как активную сессию' },
-            onChange: function () {
-                var ck = (Lampa.Storage.get(STORAGE.cookie) || '').trim();
-                applyManualCookie(ck, function (ok, msg) {
-                    Lampa.Noty.show((ok ? '✓ ' : '✗ ') + msg);
-                    $('[data-name="rezka_login_button"] .settings-param__descr').text(statusLabel());
-                });
-            }
-        });
-
-        Lampa.SettingsApi.addParam({
-            component: 'rezka',
-            param: { name: 'rezka_logout_button', type: 'trigger' },
-            field: { name: 'Выйти из аккаунта', description: 'Удалить сохранённую сессию' },
-            onChange: function () {
-                logout();
-                Lampa.Noty.show('Сессия HDREZKA очищена');
-                $('[data-name="rezka_login_button"] .settings-param__descr').text(statusLabel());
             }
         });
 
