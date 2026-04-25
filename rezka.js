@@ -21,7 +21,7 @@
      * ==================================================== */
     var manifest = {
         type: 'video',
-        version: '1.0.10',
+        version: '1.0.11',
         name: 'HDREZKA',
         description: 'Просмотр фильмов и сериалов с HDREZKA по личному аккаунту',
         component: 'rezka_online'
@@ -71,6 +71,17 @@
 
     function getCookie() {
         return (Lampa.Storage.get(STORAGE.cookie) || '').trim();
+    }
+
+    // HTML-escape (в некоторых билдах Lampa нет Lampa.Utils.escape)
+    function escapeHTML(s) {
+        if (s === null || s === undefined) return '';
+        return String(s)
+            .replace(/&/g, '&amp;')
+            .replace(/</g, '&lt;')
+            .replace(/>/g, '&gt;')
+            .replace(/"/g, '&quot;')
+            .replace(/'/g, '&#39;');
     }
 
     function isLoggedIn() {
@@ -667,7 +678,13 @@
 
         this.start = function () {
             if (Lampa.Activity.active().activity !== this.activity) return;
-            Lampa.Background.immediately(Lampa.Utils.cardImgBackgroundBlur(object.movie));
+            try {
+                if (Lampa.Utils && typeof Lampa.Utils.cardImgBackgroundBlur === 'function') {
+                    Lampa.Background.immediately(Lampa.Utils.cardImgBackgroundBlur(object.movie));
+                } else if (object.movie && (object.movie.background_image || object.movie.img)) {
+                    Lampa.Background.immediately(object.movie.background_image || object.movie.img);
+                }
+            } catch (e) { /* ignore background errors */ }
             Lampa.Controller.add('content', {
                 toggle: function () {
                     Lampa.Controller.collectionSet(scroll.render(), files.render());
@@ -719,8 +736,8 @@
             }
 
             items.forEach(function (ep) {
-                var item = $('<div class="online"><div class="online__title">' + Lampa.Utils.escape(ep.name) +
-                    '</div><div class="online__quality">' + Lampa.Utils.escape(voice.name) + '</div></div>');
+                var item = $('<div class="online"><div class="online__title">' + escapeHTML(ep.name) +
+                    '</div><div class="online__quality">' + escapeHTML(voice.name) + '</div></div>');
                 item.on('hover:enter', function () {
                     Lampa.Modal.open({
                         title: 'HDREZKA',
