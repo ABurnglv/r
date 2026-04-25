@@ -21,7 +21,7 @@
      * ==================================================== */
     var manifest = {
         type: 'video',
-        version: '1.0.6',
+        version: '1.0.7',
         name: 'HDREZKA',
         description: 'Просмотр фильмов и сериалов с HDREZKA по личному аккаунту',
         component: 'rezka_online'
@@ -340,7 +340,10 @@
      * ==================================================== */
     function searchRezka(query, year, cb) {
         var url = proxify(getDomain() + '/engine/ajax/search.php?q=' + encodeURIComponent(query));
+        console.log('REZKA', 'search start: query=', query, 'year=', year, 'url=', url);
         request({ url: url }, function (html) {
+            var preview = (typeof html === 'string' ? html : JSON.stringify(html)).slice(0, 200);
+            console.log('REZKA', 'search response len=', (typeof html === 'string' ? html.length : -1), 'preview=', preview);
             // <li><a href="..."><span class="enty">Title</span> (Original, 2023)<span class="rating">8.50</span></a></li>
             var div = document.createElement('div');
             div.innerHTML = html;
@@ -370,15 +373,21 @@
                 var exact = items.filter(function (i) { return i.year == String(year); });
                 if (exact.length) items = exact;
             }
+            console.log('REZKA', 'search parsed items=', items.length, items.length ? 'first=' + JSON.stringify(items[0]) : '');
             cb(items);
-        }, function () { cb([]); });
+        }, function (a, b) {
+            console.log('REZKA', 'search ERROR status=', (a && a.status) || a, 'msg=', b);
+            cb([]);
+        });
     }
 
     /* ====================================================
      *  Parse film page → translators / seasons / film_id
      * ==================================================== */
     function fetchFilmPage(filmUrl, cb, err) {
+        console.log('REZKA', 'fetchFilmPage url=', filmUrl);
         request({ url: proxify(filmUrl), dataType: 'text' }, function (str) {
+            console.log('REZKA', 'fetchFilmPage response len=', (str || '').length);
             var info = {
                 film_id: '',
                 is_series: false,
@@ -682,6 +691,7 @@
             var movie = object.movie || {};
             var title = movie.title || movie.name || '';
             var year = (movie.release_date || movie.first_air_date || '').slice(0, 4);
+            console.log('REZKA', 'component initialize. movie.title=', title, 'year=', year, 'domain=', getDomain(), 'logged=', isLoggedIn());
 
             searchRezka(title, year, function (results) {
                 if (!results.length) {
