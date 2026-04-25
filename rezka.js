@@ -21,7 +21,7 @@
      * ==================================================== */
     var manifest = {
         type: 'video',
-        version: '1.0.19',
+        version: '1.0.20',
         name: 'HDREZKA',
         description: 'Просмотр фильмов и сериалов с HDREZKA по личному аккаунту',
         component: 'rezka_online'
@@ -618,7 +618,10 @@
                 console.log('REZKA', 'parsed voices:', info.voice.length, info.voice.map(function(v){return v.name+'#'+v.id;}).join(' | '));
 
                 if (info.is_series) {
-                    var sm = str.match(/<ul[^>]+class="b-simple_seasons__list"[\s\S]*?<\/ul>/);
+                    // ВНИМАНИЕ: класс на rezka выглядит как 'b-simple_seasons__list clearfix',
+                    // поэтому нельзя матчить class="b-simple_seasons__list" с закрывающей кавычкой.
+                    // Используем нежадный поиск по началу класса или по id=simple-seasons-tabs.
+                    var sm = str.match(/<ul[^>]+(?:id="simple-seasons-tabs"|class="[^"]*b-simple_seasons__list[^"]*")[\s\S]*?<\/ul>/);
                     if (sm) {
                         var ds = document.createElement('div'); ds.innerHTML = sm[0];
                         ds.querySelectorAll('.b-simple_season__item').forEach(function (li) {
@@ -627,8 +630,13 @@
                                 id: li.getAttribute('data-tab_id')
                             });
                         });
+                        console.log('REZKA', 'parsed seasons:', info.season.length, info.season.map(function(s){return s.name+'#'+s.id;}).join(' | '));
+                    } else {
+                        console.log('REZKA', 'WARN seasons block not found in HTML (b-simple_seasons__list / id=simple-seasons-tabs)');
                     }
-                    var em = str.match(/<ul[^>]+class="b-simple_episodes__list"[\s\S]*?<\/ul>/g);
+                    // У эпизодов тоже class="b-simple_episodes__list clearfix". Берём ВСЕ <ul>
+                    // у которых id="simple-episodes-list-N" или класс начинается с b-simple_episodes__list.
+                    var em = str.match(/<ul[^>]+(?:id="simple-episodes-list-\d+"|class="[^"]*b-simple_episodes__list[^"]*")[\s\S]*?<\/ul>/g);
                     if (em) {
                         em.forEach(function (block) {
                             var de = document.createElement('div'); de.innerHTML = block;
@@ -640,6 +648,16 @@
                                 });
                             });
                         });
+                        console.log('REZKA', 'parsed episodes:', info.episode.length, 'across', em.length, 'season block(s)');
+                    } else {
+                        console.log('REZKA', 'WARN episodes blocks not found in HTML (b-simple_episodes__list)');
+                    }
+                    // Если на странице нет ни сезонов, ни эпизодов (старый макет / ленивая
+                    // загрузка) — попробуем дозагрузить через ajax/get_cdn_series action=get_episodes.
+                    // Реализуется отдельно по необходимости. Для основной массы новых страниц
+                    // (rezka.fi 2025+) seasons и episodes лежат в HTML напрямую.
+                    if (!info.season.length || !info.episode.length) {
+                        console.log('REZKA', 'series HTML has no inline seasons/episodes — will rely on ajax fallback if needed');
                     }
                 }
                 cb(info);
@@ -700,10 +718,19 @@
                 var sortedItems = items.slice().sort(function (a, b) {
                     return (parseInt(b.label, 10) || 0) - (parseInt(a.label, 10) || 0);
                 });
-                sortedItems.forEach(function (it) { qualities[it.label] = it.file; });
+                // Lampa.Player выбирает уровень через parseInt(ключ) == Storage.video_quality_default.
+                // На rezka бывают ключи '4K' (parseInt=4) и '2K' (parseInt=2) — они никогда не
+                // совпадут с 1080/2160. Нормализуем имя в карте: 4K → 2160p, 2K → 1440p.
+                function normalizeQualityLabel(label) {
+                    var s = String(label || '').trim();
+                    if (/^4K\b/i.test(s)) return s.replace(/^4K\b/i, '2160p');
+                    if (/^2K\b/i.test(s)) return s.replace(/^2K\b/i, '1440p');
+                    return s;
+                }
+                sortedItems.forEach(function (it) { qualities[normalizeQualityLabel(it.label)] = it.file; });
                 // Сохраняем фактические лейблы этого фильма для перестроения sort-меню в buildFilter()
                 try {
-                    var labels = sortedItems.map(function (it) { return it.label; });
+                    var labels = sortedItems.map(function (it) { return normalizeQualityLabel(it.label); });
                     Lampa.Storage.set('rezka_quality_available', labels.join(','));
                 } catch (e) {}
                 // Плейлист от hdrezka.fi отдаёт качества от худшего (360p) к лучшему (4K) в items[],
@@ -713,17 +740,17 @@
                 var picked = items[items.length - 1]; // по умолчанию — лучшее
                 if (qPref && qPref !== 'auto') {
                     var prefHeight = parseInt(qPref, 10) || 0;
-                    // 1) точное совпадение лейбла
+                    // 1) точное совпадение нормализованного лейбла
                     var exact = null;
                     for (var i = 0; i < items.length; i++) {
-                        if (items[i].label === qPref) { exact = items[i]; break; }
+                        if (normalizeQualityLabel(items[i].label) === qPref) { exact = items[i]; break; }
                     }
                     if (exact) picked = exact;
                     else if (prefHeight) {
                         // 2) ближайшее не выше желаемого (лучшее из доступных ≤ prefHeight)
                         var best = null, bestH = 0;
                         for (var j = 0; j < items.length; j++) {
-                            var h = parseInt(items[j].label, 10) || 0;
+                            var h = parseInt(normalizeQualityLabel(items[j].label), 10) || 0;
                             if (h <= prefHeight && h > bestH) { best = items[j]; bestH = h; }
                         }
                         if (best) picked = best;
