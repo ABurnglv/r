@@ -21,7 +21,7 @@
      * ==================================================== */
     var manifest = {
         type: 'video',
-        version: '1.0.4',
+        version: '1.0.5',
         name: 'HDREZKA',
         description: 'Просмотр фильмов и сериалов с HDREZKA по личному аккаунту',
         component: 'rezka_online'
@@ -734,25 +734,51 @@
 
         function insertButton(activityRender, movie) {
             if (!activityRender || !movie) return false;
-            var root = activityRender;
+            var activity = activityRender;
             // Если кнопка уже есть — выходим
-            if (root.find('.view--rezka').length) return true;
+            if (activity.find('.view--rezka').length) return true;
 
-            // 1) Современная вёрстка Lampa — кнопка «Смотреть» имеет класс view--torrent
-            var anchor = root.find('.view--torrent');
-            if (anchor.length) {
-                var btn = buildButton(movie);
-                anchor.after(btn);
-                return true;
+            var btn = buildButton(movie);
+
+            // Логика вставки скопирована из modss/online_mod — работает на всех темах (CUB, классическая, full-start-new)
+            try {
+                if (activity.find('.button--priority').length) {
+                    // CUB-тема с кнопкой-приоритетом — вставляем в начало блока кнопок
+                    activity.find('.full-start-new__buttons').prepend(btn);
+                } else if (activity.find('.button--play').length) {
+                    // CUB-тема: кнопка Play — это круглый «воспроизвести». Ставим рядом.
+                    if (activity.find('.full-start__button').length) {
+                        activity.find('.full-start__button').first().before(btn);
+                    } else {
+                        activity.find('.button--play').before(btn);
+                    }
+                } else if (activity.find('.view--torrent').length) {
+                    // Классическая вёрстка — рядом со «Смотреть» (торренты)
+                    activity.find('.view--torrent').before(btn);
+                } else if (activity.find('.full-start-new__buttons').length) {
+                    activity.find('.full-start-new__buttons').prepend(btn);
+                } else if (activity.find('.full-start__buttons').length) {
+                    activity.find('.full-start__buttons').prepend(btn);
+                } else {
+                    return false;
+                }
+            } catch (err) {
+                console.log('REZKA', 'insertButton fail', err);
+                return false;
             }
-            // 2) Альтернативная: контейнер кнопок (на старых темах)
-            var container = root.find('.full-start-new__buttons');
-            if (!container.length) container = root.find('.full-start__buttons');
-            if (container.length) {
-                container.append(buildButton(movie));
-                return true;
-            }
-            return false;
+
+            // Фокусируем кнопку (чтобы она была сразу под указателем)
+            try {
+                var enabled = Lampa.Controller.enabled() && Lampa.Controller.enabled().name;
+                if (enabled === 'content' || enabled === 'full_start' || enabled === 'settings_component') {
+                    Lampa.Controller.toggle(enabled);
+                    if (typeof Navigator !== 'undefined' && Navigator.focus) {
+                        Navigator.focus(btn[0]);
+                    }
+                }
+            } catch (err) { /* noop */ }
+
+            return true;
         }
 
         // Подписка на основное событие отрисовки карточки
