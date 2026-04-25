@@ -21,7 +21,7 @@
      * ==================================================== */
     var manifest = {
         type: 'video',
-        version: '1.0.15',
+        version: '1.0.16',
         name: 'HDREZKA',
         description: 'Просмотр фильмов и сериалов с HDREZKA по личному аккаунту',
         component: 'rezka_online'
@@ -541,9 +541,18 @@
                                 // id может быть в data-translator_id, data-id, или в onclick="...,XXX,..."
                                 var id = a.getAttribute('data-translator_id') || a.getAttribute('data-id') || '';
                                 if (!id) {
+                                    // rezka.fi: onclick="initCDNMoviesEvents(<film_id>, <translator_id>, ...)"
+                                    // нужен именно второй числовой аргумент — первый это ID фильма,
+                                    // и если взять его для всех озвучек, все получат одинаковый поток.
                                     var oc = a.getAttribute('onclick') || a.getAttribute('data-onclick') || '';
-                                    var im = oc.match(/(\d{3,})/);
+                                    var im = oc.match(/initCDN[A-Za-z]+Events\(\s*\d+\s*,\s*(\d+)/);
                                     if (im) id = im[1];
+                                    // fallback — второе числовое вхождение (id фильма + id перевода)
+                                    if (!id) {
+                                        var nums = oc.match(/\d{2,}/g);
+                                        if (nums && nums.length >= 2) id = nums[1];
+                                        else if (nums && nums.length) id = nums[0];
+                                    }
                                 }
                                 info.voice.push({
                                     name: name,
@@ -652,16 +661,42 @@
                 var items = parsePlaylist(decoded);
                 if (!items.length) { err && err('Пустой плейлист'); return; }
                 var qualities = {};
-                items.forEach(function (it) { qualities[it.label] = it.file; });
-                // Плейлист от hdrezka.fi отдаёт качества в порядке от худшего (360p) к лучшему (4K).
-                // Выбираем файл по пользовательскому предпочтению (Storage rezka_quality), fallback — лучшее.
+                // Сортируем от лучшего к худшему для корректного Player.getUrlQuality fallback
+                var sortedItems = items.slice().sort(function (a, b) {
+                    return (parseInt(b.label, 10) || 0) - (parseInt(a.label, 10) || 0);
+                });
+                sortedItems.forEach(function (it) { qualities[it.label] = it.file; });
+                // Сохраняем фактические лейблы этого фильма для перестроения sort-меню в buildFilter()
+                try {
+                    var labels = sortedItems.map(function (it) { return it.label; });
+                    Lampa.Storage.set('rezka_quality_available', labels.join(','));
+                } catch (e) {}
+                // Плейлист от hdrezka.fi отдаёт качества от худшего (360p) к лучшему (4K) в items[],
+                // выбираем файл по пользовательскому предпочтению (Storage rezka_quality).
+                // fallback: берём ближайшее по высоте качество — или лучшее (последний элемент items).
                 var qPref = Lampa.Storage.get(STORAGE.quality, 'auto');
                 var picked = items[items.length - 1]; // по умолчанию — лучшее
                 if (qPref && qPref !== 'auto') {
+                    var prefHeight = parseInt(qPref, 10) || 0;
+                    // 1) точное совпадение лейбла
+                    var exact = null;
                     for (var i = 0; i < items.length; i++) {
-                        if (items[i].label === qPref) { picked = items[i]; break; }
+                        if (items[i].label === qPref) { exact = items[i]; break; }
+                    }
+                    if (exact) picked = exact;
+                    else if (prefHeight) {
+                        // 2) ближайшее не выше желаемого (лучшее из доступных ≤ prefHeight)
+                        var best = null, bestH = 0;
+                        for (var j = 0; j < items.length; j++) {
+                            var h = parseInt(items[j].label, 10) || 0;
+                            if (h <= prefHeight && h > bestH) { best = items[j]; bestH = h; }
+                        }
+                        if (best) picked = best;
                     }
                 }
+                console.log('REZKA', 'getStream picked', picked && picked.label, 'pref=', qPref, 'available=', Object.keys(qualities).join('/'));
+                // Сообщаем в компонент (если подписан) — он перестроит sort-меню
+                try { Lampa.Listener.send('rezka_quality', { type: 'available', labels: sortedItems.map(function(i){return i.label;}) }); } catch(e) {}
                 cb({
                     title: '',
                     file: picked.file,
@@ -802,14 +837,22 @@
                 });
         }
 
-        // Простой строковый hash (Lampa.Utils.hash отсутствует в этой сборке Lampa)
+        // Нужен ИМЕННО тот же хэш, что использует Lampa карточка/другие плагины — иначе
+        // прогресс не будет находиться в file_view. Используем Lampa.Utils.hash если доступен,
+        // иначе — идентичная реализация (Math.abs(djb2-style hash) в десятичной форме).
         function strHash(str) {
+            try {
+                if (Lampa.Utils && typeof Lampa.Utils.hash === 'function') {
+                    return Lampa.Utils.hash(String(str || ''));
+                }
+            } catch (e) { /* fallback */ }
             var h = 0, s = String(str || '');
+            if (s.length === 0) return '' + h;
             for (var i = 0; i < s.length; i++) {
                 h = ((h << 5) - h) + s.charCodeAt(i);
-                h |= 0;
+                h = h & h;
             }
-            return Math.abs(h).toString(36);
+            return '' + Math.abs(h);
         }
 
         // Создаёт prestige-карточку в стиле lampac (постер + таймлайн + детали просмотра + инфо + качество)
@@ -910,9 +953,11 @@
                     return String(e.season_id) === String(season.id);
                 }) : [];
                 items.forEach(function (ep) {
-                    // hash совпадает с формулой lampac — будет синхрон прогресса между плагинами
+                    // Формула hash идентична lampac/Lampa.Full.js: [season_number, ':' если season>10, episode_number, original_title]
                     var origTitle = (object.movie.original_name || object.movie.original_title || movieTitle || '');
-                    var hash = strHash([season.name || season.id, season.id > 10 ? ':' : '', ep.name, origTitle].join(''));
+                    var sNum = parseInt(ep.season_id || season.id, 10) || 0;
+                    var eNum = parseInt(ep.episode_id || ep.name, 10) || 0;
+                    var hash = strHash([sNum, sNum > 10 ? ':' : '', eNum, origTitle].join(''));
                     var card = makePrestigeCard({
                         title: ep.name,
                         time: episodeRuntime,
@@ -935,10 +980,12 @@
             } else {
                 // Фильм: по одной prestige-карточке на каждую озвучку
                 info.voice.forEach(function (voice, idx) {
-                    // Для фильма — hash привязываем к original_title (как лампак) плюс озвучка,
-                    // чтобы у каждой озвучки был свой прогресс просмотра.
+                    // Фильм: hash = Lampa.Utils.hash(original_title) — именно так Lampa ищет прогресс
+                    // на карточке фильма (функция выше в lampa.app.min.js: Timeline.view(Utils.hash([data.original_title].join(''))).
+                    // Используем тот же hash для всех озвучек — так все карточки будут синхронизированы
+                    // с тем прогрессом, что показан на общей TMDB карточке фильма.
                     var origTitle = (object.movie.original_title || object.movie.original_name || movieTitle || '');
-                    var hash = strHash(origTitle + '|' + voice.name);
+                    var hash = strHash(origTitle);
                     var card = makePrestigeCard({
                         title: voice.name,
                         time: movieRuntime,
@@ -980,8 +1027,12 @@
             var qLabel = qPref === 'auto' ? 'Максимальное' : qPref;
 
             // Правый блок (sort) = переключатель качества. Сохраняется на следующие фильмы.
+            // Используем список фактически доступных качеств, если уже получили плейлист фильма
+            // (сохраняется в getStream под ключом rezka_quality_available). Иначе — полный список.
+            var availableLabels = (Lampa.Storage.get('rezka_quality_available', '') || '').split(',').filter(Boolean);
+            var sourceList = availableLabels.length ? availableLabels : QUALITY_ORDER;
             var qualityItems = [{ title: 'Максимальное', value: 'auto', selected: qPref === 'auto' }]
-                .concat(QUALITY_ORDER.map(function (q) {
+                .concat(sourceList.map(function (q) {
                     return { title: q, value: q, selected: qPref === q };
                 }));
             try { filter.set('sort', qualityItems); } catch (e) {}
@@ -1051,8 +1102,27 @@
             return 0;
         }
 
+        // Подписываемся на обновление списка доступных качеств (после первого getStream)
+        var qualityListener = function (e) {
+            if (e && e.type === 'available') {
+                try { buildFilter(); } catch (er) {}
+            }
+        };
+        try { Lampa.Listener.follow('rezka_quality', qualityListener); } catch (e) {}
+
+        this.destroy = function () {
+            try { Lampa.Listener.remove('rezka_quality', qualityListener); } catch (e) {}
+            try { network.clear(); } catch (e) {}
+            try { scroll.destroy(); } catch (e) {}
+            try { files.destroy(); } catch (e) {}
+            try { filter.destroy && filter.destroy(); } catch (e) {}
+            html.remove();
+        };
+
         this.initialize = function () {
             this.activity.loader(true);
+            // сбрасываем список фактически доступных качеств — это новый фильм
+            try { Lampa.Storage.set('rezka_quality_available', ''); } catch (e) {}
 
             var movie = object.movie || {};
             var title = movie.title || movie.name || '';
