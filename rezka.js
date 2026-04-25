@@ -21,7 +21,7 @@
      * ==================================================== */
     var manifest = {
         type: 'video',
-        version: '1.0.3',
+        version: '1.0.4',
         name: 'HDREZKA',
         description: 'Просмотр фильмов и сериалов с HDREZKA по личному аккаунту',
         component: 'rezka_online'
@@ -705,61 +705,75 @@
     }
 
     /* ====================================================
-     *  Кнопка «HDREZKA» прямо в карточке фильма (рядом со «Смотреть»)
-     *  Срабатывает на событии full → complite, когда карточка отрисована.
+     *  Кнопка «HDREZKA» прямо в карточке фильма
+     *  Вставляется сразу после кнопки «Смотреть» (.view--torrent),
+     *  как это делают популярные плагины modss / online_mod.
      * ==================================================== */
     function addCardButton() {
-        // Inline-стили для кнопки (Lampa использует свои классы, мы
-        // дополнительно добавляем минимальный CSS на случай отсутствия темы)
         var styleId = 'rezka-plugin-style';
         if (!document.getElementById(styleId)) {
             var st = document.createElement('style');
             st.id = styleId;
             st.innerHTML =
-                '.full-start__button.view--rezka{background:linear-gradient(135deg,#1d8a3a,#0f5e25);color:#fff}' +
-                '.full-start-new__buttons .view--rezka,.full-start__buttons .view--rezka{order:-1}' +
-                '.view--rezka .button__icon{margin-right:.4em}';
+                '.full-start__button.view--rezka,.full-start-new__buttons-button.view--rezka{background:linear-gradient(135deg,#1d8a3a,#0f5e25);color:#fff}' +
+                '.view--rezka .button__icon{margin-right:.4em;vertical-align:middle}' +
+                '.view--rezka span{vertical-align:middle}';
             document.head.appendChild(st);
         }
 
-        Lampa.Listener.follow('full', function (e) {
-            if (e.type !== 'complite') return;
-
-            var root = e.object.activity.render();
-            // Поддерживаем разные темы карточки: новую и классическую
-            var btnContainer = root.find('.full-start-new__buttons');
-            if (!btnContainer.length) btnContainer = root.find('.full-start__buttons');
-            if (!btnContainer.length) return;
-            if (root.find('.view--rezka').length) return; // уже добавлена
-
+        function buildButton(movie) {
             var label = '<svg class="button__icon" width="22" height="22" viewBox="0 0 24 24" fill="none" xmlns="http://www.w3.org/2000/svg">' +
                 '<path d="M9 8l6 4-6 4V8z" fill="currentColor"/></svg>' +
                 '<span>HDREZKA</span>';
 
-            var btn = $(
-                '<div class="full-start__button selector view--online view--rezka">' + label + '</div>'
-            );
+            // Используем универсальный класс selector — Lampa сама подхватит фокус
+            var btn = $('<div class="full-start__button selector view--online view--rezka">' + label + '</div>');
+            btn.on('hover:enter', function () { openRezka(movie); });
+            return btn;
+        }
 
-            btn.on('hover:enter', function () { openRezka(e.data.movie); });
+        function insertButton(activityRender, movie) {
+            if (!activityRender || !movie) return false;
+            var root = activityRender;
+            // Если кнопка уже есть — выходим
+            if (root.find('.view--rezka').length) return true;
 
-            // Помещаем кнопку ПЕРВОЙ — слева от «Смотреть» / «Онлайн»
-            btnContainer.prepend(btn);
+            // 1) Современная вёрстка Lampa — кнопка «Смотреть» имеет класс view--torrent
+            var anchor = root.find('.view--torrent');
+            if (anchor.length) {
+                var btn = buildButton(movie);
+                anchor.after(btn);
+                return true;
+            }
+            // 2) Альтернативная: контейнер кнопок (на старых темах)
+            var container = root.find('.full-start-new__buttons');
+            if (!container.length) container = root.find('.full-start__buttons');
+            if (container.length) {
+                container.append(buildButton(movie));
+                return true;
+            }
+            return false;
+        }
 
-            // Делаем эту кнопку активной по умолчанию (фокус под указателем).
-            // Lampa перестроит навигацию после prepend, поэтому нужно немного подождать.
-            setTimeout(function () {
-                try {
-                    if (Navigator && Navigator.focused) {
-                        Navigator.focused(btn[0]);
-                    } else {
-                        Lampa.Controller.collectionFocus(btn[0], root);
-                    }
-                } catch (err) {
-                    // На некоторых сборках Navigator может быть недоступен
-                    btn.addClass('focus');
-                }
-            }, 50);
+        // Подписка на основное событие отрисовки карточки
+        Lampa.Listener.follow('full', function (e) {
+            if (e.type !== 'complite') return;
+            try {
+                insertButton(e.object.activity.render(), e.data.movie);
+            } catch (err) {
+                console.log('REZKA', 'addCardButton complite error', err);
+            }
         });
+
+        // Если плагин загрузился ПОСЛЕ того, как карточка уже была отрисована
+        // (типичный кейс: пользователь установил плагин и сразу открыл фильм),
+        // событие 'complite' к нам не придёт. Принудительно вставим кнопку.
+        try {
+            var act = Lampa.Activity && Lampa.Activity.active && Lampa.Activity.active();
+            if (act && act.component === 'full' && act.activity) {
+                insertButton(act.activity.render(), act.card || (act.activity.render && act.activity.render().data && act.activity.render().data('movie')));
+            }
+        } catch (e) { /* noop */ }
     }
 
     /* ====================================================
