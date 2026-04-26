@@ -21,7 +21,7 @@
      * ==================================================== */
     var manifest = {
         type: 'video',
-        version: '1.0.44',
+        version: '1.0.45',
         name: 'HDREZKA',
         description: 'Просмотр фильмов и сериалов с HDREZKA по личному аккаунту',
         component: 'rezka_online'
@@ -1130,10 +1130,22 @@
                 down: function () { Navigator.move('down'); },
                 left: function () { Lampa.Controller.toggle('menu'); },
                 right: function () {
-                    // Раньше просто двигался вправо по карточкам.
-                    // Ниже: если вправо двигаться некуда — перекидываем фокус на фильтр вверху.
+                    // v1.0.45: когда вправо двигаться некуда (в списке серий
+                    // одна колонка) — открываем выпадающий фильтр напрямую
+                    // (тот же паттерн, что в встроенной Lampa Online).
                     if (Navigator.canmove('right')) { Navigator.move('right'); return; }
-                    try { Lampa.Controller.toggle('head'); } catch (e) {}
+                    try {
+                        var $ff = filter.render().find('.filter--filter');
+                        if ($ff.length && !$ff.hasClass('hide')) {
+                            $ff.trigger('hover:enter');
+                            return;
+                        }
+                        var $fs = filter.render().find('.filter--sort');
+                        if ($fs.length && !$fs.hasClass('hide')) {
+                            $fs.trigger('hover:enter');
+                            return;
+                        }
+                    } catch (eRf) { console.log('REZKA', 'right → filter open failed:', eRf && eRf.message); }
                 },
                 back: this.back
             });
