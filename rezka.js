@@ -21,7 +21,7 @@
      * ==================================================== */
     var manifest = {
         type: 'video',
-        version: '1.0.46',
+        version: '1.0.47',
         name: 'HDREZKA',
         description: 'Просмотр фильмов и сериалов с HDREZKA по личному аккаунту',
         component: 'rezka_online'
@@ -1118,16 +1118,21 @@
                     Lampa.Background.immediately(object.movie.background_image || object.movie.img);
                 }
             } catch (e) { /* ignore background errors */ }
-            // v1.0.46: сохранённый фокус перед переходом в фильтр (чтобы вернуться на ту же карточку/серию)
-            var savedFocusEl = false;
+            // v1.0.46/47: сохранённый фокус перед переходом в фильтр.
+            // savedFocusIdx — порядковый номер фокусируемого .selector в scroll;
+            // выживает после buildList() (в отличие от самого DOM-узла).
+            self._savedFocusIdx = -1;
             Lampa.Controller.add('content', {
                 toggle: function () {
                     Lampa.Controller.collectionSet(scroll.render(), files.render());
-                    // Если есть сохранённый фокус и элемент всё ещё в DOM — восстанавливаем его.
-                    if (savedFocusEl && savedFocusEl.length && $.contains(scroll.render()[0], savedFocusEl[0])) {
-                        Lampa.Controller.collectionFocus(savedFocusEl[0], scroll.render());
-                        savedFocusEl = false;
+                    // Если есть сохранённый индекс и такой .selector существует — фокусируемся на нём.
+                    var $sel = scroll.render().find('.selector');
+                    if (self._savedFocusIdx >= 0 && $sel.length > self._savedFocusIdx) {
+                        var targetEl = $sel[self._savedFocusIdx];
+                        self._savedFocusIdx = -1;
+                        Lampa.Controller.collectionFocus(targetEl, scroll.render());
                     } else {
+                        self._savedFocusIdx = -1;
                         Lampa.Controller.collectionFocus(false, scroll.render());
                     }
                 },
@@ -1140,11 +1145,16 @@
                 right: function () {
                     // v1.0.45: когда вправо двигаться некуда (в списке серий
                     // одна колонка) — открываем выпадающий фильтр напрямую.
-                    // v1.0.46: запоминаем текущий фокус, чтобы вернуться на ту же серию.
+                    // v1.0.47: запоминаем индекс сфокусированного .selector внутри scroll —
+                    // индекс выживает пересоздание DOM после buildList().
                     if (Navigator.canmove('right')) { Navigator.move('right'); return; }
                     try {
+                        var $sel = scroll.render().find('.selector');
                         var $focused = scroll.render().find('.focus').first();
-                        if ($focused.length) savedFocusEl = $focused;
+                        if ($focused.length && $sel.length) {
+                            self._savedFocusIdx = $sel.index($focused);
+                            console.log('REZKA', 'right → saved focus idx=' + self._savedFocusIdx);
+                        }
                     } catch (eSf) {}
                     try {
                         var $ff = filter.render().find('.filter--filter');
@@ -1695,8 +1705,20 @@
             scroll.append(html);
             Lampa.Controller.enable('content');
             // v1.0.35: автофокус на последнюю просматривавшуюся серию (если есть прогресс).
+            // v1.0.47: приоритет у _savedFocusIdx (возврат после фильтра) над _pendingFocusEl (прогресс).
             try {
-                if (state._pendingFocusEl) {
+                if (self._savedFocusIdx >= 0) {
+                    var savedIdx = self._savedFocusIdx;
+                    self._savedFocusIdx = -1;
+                    state._pendingFocusEl = null; // перебиваем прогресс-фокус
+                    setTimeout(function () {
+                        try {
+                            var $sel = scroll.render().find('.selector');
+                            var t = $sel.length > savedIdx ? $sel[savedIdx] : ($sel.length ? $sel[$sel.length - 1] : null);
+                            if (t) Lampa.Controller.collectionFocus(t, scroll.render());
+                        } catch (er) { console.log('REZKA', 'restore saved idx error:', er && er.message); }
+                    }, 0);
+                } else if (state._pendingFocusEl) {
                     var targetEl = state._pendingFocusEl;
                     state._pendingFocusEl = null;
                     // Два setTimeout чтобы: 1) дать DOM вставиться, 2) Lampa.Controller.enable успел примениться.
@@ -2527,6 +2549,29 @@
                 watchAndInsert(rendered, movie);
             } catch (err) {
                 console.log('REZKA', 'addCardButton complite error', err);
+            }
+        });
+
+        // v1.0.47: при возврате на карточку (из списка серий, плеера и т.д.) —
+        // повторно проверяем, чтобы HDREZKA была первой и в фокусе.
+        Lampa.Listener.follow('activity', function (e) {
+            if (!e || !e.object) return;
+            if (e.object.component !== 'full') return;
+            if (e.type !== 'start' && e.type !== 'archive') return;
+            try {
+                var rendered = e.object.activity && e.object.activity.render && e.object.activity.render();
+                var movie = e.object.movie || e.object.card;
+                if (!movie) {
+                    try {
+                        var stored = Lampa.Storage.get('activity', '{}');
+                        movie = stored && stored.movie;
+                    } catch (e1) {}
+                }
+                if (rendered && movie) {
+                    watchAndInsert(rendered, movie);
+                }
+            } catch (err) {
+                console.log('REZKA', 'addCardButton activity error', err);
             }
         });
 
