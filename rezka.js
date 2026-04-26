@@ -21,7 +21,7 @@
      * ==================================================== */
     var manifest = {
         type: 'video',
-        version: '1.0.50',
+        version: '1.0.51',
         name: 'HDREZKA',
         description: 'Просмотр фильмов и сериалов с HDREZKA по личному аккаунту',
         component: 'rezka_online'
@@ -1312,6 +1312,9 @@
                     if (sharedTimeline) item.timeline = sharedTimeline;
 
                     // Дорожки озвучки → кнопка «Дорожки» в плеере.
+                    // v1.0.51: переключаем озвучку БЕЗ закрытия плеера.
+                    // Просто получаем новый url и вызываем Lampa.Player.play(newItem) —
+                    // тот же паттерн, что в встроенном Lampa Online.
                     if (info.voice.length > 1) {
                         try {
                             var voiceovers = info.voice.map(function (v, vi) {
@@ -1322,14 +1325,43 @@
                                     index: vi,
                                     selected: vi === defIdx,
                                     enabled:  vi === defIdx,
-                                    onSelect: function () {
-                                        if (vi === defIdx) return;
-                                        console.log('REZKA', 'film voice change in player:', curVoice.name, '->', v.name);
+                                    onSelect: function (chosen) {
+                                        // Если выбрана та же дорожка, что и сейчас играет — ничего не делаем.
+                                        // Ищем текущую в item.voiceovers (её selected=true, но до этого она была сброшена Select.show выше).
+                                        // Проще — сравниваем индекс с текущим voice_name из pleiера.
+                                        try {
+                                            var pd = Lampa.Player.playdata && Lampa.Player.playdata();
+                                            if (pd && pd.voice_name && pd.voice_name === v.name) return;
+                                        } catch (eVc) {}
+                                        console.log('REZKA', 'film voice change in player ->', v.name);
                                         Lampa.Noty.show('HDREZKA: переключаю на «' + v.name + '»…');
-                                        try { Lampa.Player.close(); } catch (e) {}
-                                        // Обновляем выбор в state, чтобы фильтр в карточном UI отражал актуальное.
                                         try { state.choice.voice = vi; } catch (e) {}
-                                        setTimeout(function () { playFilm(info, vi); }, 200);
+                                        var newVoice = info.voice[vi];
+                                        try { window._rezkaCurrentFilmId = curFilmId(); } catch (e) {}
+                                        getStream(info, newVoice, null, null,
+                                            function (newData) {
+                                                applyQualityToPlayer();
+                                                var newItem = {
+                                                    title: movieTitle + ' — ' + newVoice.name,
+                                                    url: newData.file,
+                                                    quality: newData.quality,
+                                                    subtitles: newData.subtitles,
+                                                    voice_name: newVoice.name
+                                                };
+                                                if (sharedTimeline) newItem.timeline = sharedTimeline;
+                                                // Сохраняем возможность дальше менять озвучку — перевыставляем selected/enabled.
+                                                if (item.voiceovers) {
+                                                    item.voiceovers.forEach(function (vo) {
+                                                        vo.selected = vo.index === vi;
+                                                        vo.enabled  = vo.index === vi;
+                                                    });
+                                                    newItem.voiceovers = item.voiceovers;
+                                                }
+                                                Lampa.Player.play(newItem);
+                                            },
+                                            function (msg) {
+                                                Lampa.Noty.show('HDREZKA: не удалось переключить озвучку: ' + msg);
+                                            });
                                     }
                                 };
                             });
