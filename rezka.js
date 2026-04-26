@@ -21,7 +21,7 @@
      * ==================================================== */
     var manifest = {
         type: 'video',
-        version: '1.0.45',
+        version: '1.0.46',
         name: 'HDREZKA',
         description: 'Просмотр фильмов и сериалов с HDREZKA по личному аккаунту',
         component: 'rezka_online'
@@ -1118,10 +1118,18 @@
                     Lampa.Background.immediately(object.movie.background_image || object.movie.img);
                 }
             } catch (e) { /* ignore background errors */ }
+            // v1.0.46: сохранённый фокус перед переходом в фильтр (чтобы вернуться на ту же карточку/серию)
+            var savedFocusEl = false;
             Lampa.Controller.add('content', {
                 toggle: function () {
                     Lampa.Controller.collectionSet(scroll.render(), files.render());
-                    Lampa.Controller.collectionFocus(false, scroll.render());
+                    // Если есть сохранённый фокус и элемент всё ещё в DOM — восстанавливаем его.
+                    if (savedFocusEl && savedFocusEl.length && $.contains(scroll.render()[0], savedFocusEl[0])) {
+                        Lampa.Controller.collectionFocus(savedFocusEl[0], scroll.render());
+                        savedFocusEl = false;
+                    } else {
+                        Lampa.Controller.collectionFocus(false, scroll.render());
+                    }
                 },
                 up: function () {
                     if (Navigator.canmove('up')) Navigator.move('up');
@@ -1131,9 +1139,13 @@
                 left: function () { Lampa.Controller.toggle('menu'); },
                 right: function () {
                     // v1.0.45: когда вправо двигаться некуда (в списке серий
-                    // одна колонка) — открываем выпадающий фильтр напрямую
-                    // (тот же паттерн, что в встроенной Lampa Online).
+                    // одна колонка) — открываем выпадающий фильтр напрямую.
+                    // v1.0.46: запоминаем текущий фокус, чтобы вернуться на ту же серию.
                     if (Navigator.canmove('right')) { Navigator.move('right'); return; }
+                    try {
+                        var $focused = scroll.render().find('.focus').first();
+                        if ($focused.length) savedFocusEl = $focused;
+                    } catch (eSf) {}
                     try {
                         var $ff = filter.render().find('.filter--filter');
                         if ($ff.length && !$ff.hasClass('hide')) {
@@ -2429,46 +2441,81 @@
             return btn;
         }
 
+        // v1.0.46: вставляем или переставляем кнопку HDREZKA в самое начало блока кнопок.
+        // Возвращает:
+        //   true  — кнопка вставлена в реальный контейнер кнопок (это финальный результат);
+        //   false — вставить пока некуда (вёрстка ещё не готова).
         function insertButton(activityRender, movie) {
             if (!activityRender || !movie) return false;
             var activity = activityRender;
-            // Если кнопка уже есть — выходим
-            if (activity.find('.view--rezka').length) return true;
 
-            var btn = buildButton(movie);
-
-            // Логика вставки скопирована из modss/online_mod — работает на всех темах (CUB, классическая, full-start-new)
-            try {
-                if (activity.find('.button--priority').length) {
-                    // CUB-тема с кнопкой-приоритетом — вставляем в начало блока кнопок
-                    activity.find('.full-start-new__buttons').prepend(btn);
-                } else if (activity.find('.button--play').length) {
-                    // CUB-тема: кнопка Play — это круглый «воспроизвести». Ставим рядом.
-                    if (activity.find('.full-start__button').length) {
-                        activity.find('.full-start__button').first().before(btn);
-                    } else {
-                        activity.find('.button--play').before(btn);
-                    }
-                } else if (activity.find('.view--torrent').length) {
-                    // Классическая вёрстка — рядом со «Смотреть» (торренты)
-                    activity.find('.view--torrent').before(btn);
-                } else if (activity.find('.full-start-new__buttons').length) {
-                    activity.find('.full-start-new__buttons').prepend(btn);
-                } else if (activity.find('.full-start__buttons').length) {
-                    activity.find('.full-start__buttons').prepend(btn);
-                } else {
-                    return false;
-                }
-            } catch (err) {
-                console.log('REZKA', 'insertButton fail', err);
+            // 1) Определяем основной контейнер кнопок.
+            //    Приоритет CUB (full-start-new), затем классика (full-start).
+            var $container = activity.find('.full-start-new__buttons').first();
+            if (!$container.length) $container = activity.find('.full-start__buttons').first();
+            if (!$container.length) {
+                // Ни одного контейнера нет — вёрстка ещё не готова.
                 return false;
             }
 
-            // Фокус СПЕЦИАЛЬНО НЕ ПЕРЕСТАВЛЯЕМ и controller НЕ трогаем.
-            // Иначе другие online-плагины (modss, online_mod и т.п.) не успевают
-            // вставить свои кнопки (они подгружаются POST-запросом со задержкой).
-            // Первая кнопка в контейнере и так получит фокус по умолчанию.
+            var $existing = activity.find('.view--rezka');
+            var $btn;
+            if ($existing.length) {
+                $btn = $existing;
+            } else {
+                $btn = buildButton(movie);
+            }
+
+            // 2) Гарантируем, что кнопка — первая в контейнере (даже если кто-то вставил свою раньше).
+            //    prependTo перемещает (а не клонирует) существующий DOM-узел.
+            try {
+                if (!$btn.parent().is($container) || !$btn.is(':first-child')) {
+                    $btn.prependTo($container);
+                }
+            } catch (e) {
+                console.log('REZKA', 'insertButton: prepend fail', e && e.message);
+                return false;
+            }
+
+            // 3) Ставим фокус на нашу кнопку — она должна быть в фокусе сразу.
+            //    Но только если мы в карточке (component=full) и фокус сейчас в блоке кнопок.
+            try {
+                $container.find('.focus').removeClass('focus');
+                $btn.addClass('focus');
+                if (Lampa.Controller && Lampa.Controller.collectionFocus) {
+                    Lampa.Controller.collectionFocus($btn[0], activity);
+                }
+            } catch (eF) { /* noop */ }
+
             return true;
+        }
+
+        // Следим за DOM до тех пор, пока кнопка не станет первой.
+        // Держим обзервер небольшое время, чтобы и после вставки modss/online_mod
+        // наша кнопка оставалась первой.
+        function watchAndInsert(rendered, movie) {
+            // Первая попытка — сразу.
+            insertButton(rendered, movie);
+
+            var rootEl = rendered && rendered[0];
+            if (!rootEl || !window.MutationObserver) {
+                // Фолбэк: несколько попыток по таймеру.
+                [80, 200, 500, 900, 1500, 2500, 4000].forEach(function (t) {
+                    setTimeout(function () { insertButton(rendered, movie); }, t);
+                });
+                return;
+            }
+            var calls = 0;
+            var obs = new MutationObserver(function () {
+                calls++;
+                insertButton(rendered, movie);
+                if (calls > 200) { try { obs.disconnect(); } catch (e) {} }
+            });
+            try {
+                obs.observe(rootEl, { childList: true, subtree: true });
+            } catch (e) { /* noop */ }
+            // Через 6с отключаемся — всё равно позже никто не вставляет кнопки.
+            setTimeout(function () { try { obs.disconnect(); } catch (e) {} }, 6000);
         }
 
         // Подписка на основное событие отрисовки карточки
@@ -2477,12 +2524,7 @@
             try {
                 var rendered = e.object.activity.render();
                 var movie = e.data.movie;
-                // Первая попытка — сразу
-                insertButton(rendered, movie);
-                // Вторая попытка через 1.5с — если при первой попытке кнопки
-                // .button--play / .button--priority ещё не было (вёрстка CUB рендерится асинхронно),
-                // вставим повторно — функция сама проверяет дублирование.
-                setTimeout(function () { insertButton(rendered, movie); }, 1500);
+                watchAndInsert(rendered, movie);
             } catch (err) {
                 console.log('REZKA', 'addCardButton complite error', err);
             }
@@ -2492,7 +2534,7 @@
         try {
             var act = Lampa.Activity && Lampa.Activity.active && Lampa.Activity.active();
             if (act && act.component === 'full' && act.activity) {
-                insertButton(act.activity.render(), act.card || (act.activity.render && act.activity.render().data && act.activity.render().data('movie')));
+                watchAndInsert(act.activity.render(), act.card || (act.activity.render && act.activity.render().data && act.activity.render().data('movie')));
             }
         } catch (e) { /* noop */ }
     }
