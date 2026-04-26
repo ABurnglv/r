@@ -21,7 +21,7 @@
      * ==================================================== */
     var manifest = {
         type: 'video',
-        version: '1.0.41',
+        version: '1.0.42',
         name: 'HDREZKA',
         description: 'Просмотр фильмов и сериалов с HDREZKA по личному аккаунту',
         component: 'rezka_online'
@@ -105,13 +105,13 @@
      *  Helpers
      * ==================================================== */
     function getDomain() {
-        var d = (Lampa.Storage.get(STORAGE.domain) || 'https://rezka.fi').trim();
+        var d = String(Lampa.Storage.get(STORAGE.domain) || 'https://rezka.fi').trim();
         if (!/^https?:\/\//i.test(d)) d = 'https://' + d;
         return d.replace(/\/+$/, '');
     }
 
     function getCookie() {
-        return (Lampa.Storage.get(STORAGE.cookie) || '').trim();
+        return String(Lampa.Storage.get(STORAGE.cookie) || '').trim();
     }
 
     // HTML-escape (в некоторых билдах Lampa нет Lampa.Utils.escape)
@@ -154,7 +154,7 @@
      * we still try the direct URL — Lampa Android-APK bypasses CORS natively.
      */
     function proxify(url) {
-        var p = (Lampa.Storage.get(STORAGE.proxy) || '').trim();
+        var p = String(Lampa.Storage.get(STORAGE.proxy) || '').trim();
         if (!p) return url;
         // Lampac-style: <proxy>/<url>
         if (p.slice(-1) !== '/') p += '/';
@@ -354,7 +354,7 @@
                    '&login_password=' + encodeURIComponent(password) +
                    '&login_not_save=0';
 
-        var userProxy = (Lampa.Storage.get(STORAGE.proxy) || '').trim();
+        var userProxy = String(Lampa.Storage.get(STORAGE.proxy) || '').trim();
         // Попытки: 1) прямой, 2) пользовательский прокси (если есть)
         var attempts = [''];
         if (userProxy) {
@@ -2451,8 +2451,8 @@
      *  Settings panel: domain / login / password / login
      * ==================================================== */
     function statusLabel() {
-        var s = Lampa.Storage.get(STORAGE.status) || 'guest';
-        var ck = (Lampa.Storage.get(STORAGE.cookie) || '').trim();
+        var s = String(Lampa.Storage.get(STORAGE.status) || 'guest');
+        var ck = String(Lampa.Storage.get(STORAGE.cookie) || '').trim();
         var ts = parseInt(Lampa.Storage.get(STORAGE.loginTs, 0), 10) || 0;
         if (s === 'logged') {
             var info = '';
@@ -2515,7 +2515,7 @@
             param: { name: 'rezka_apply_cookie_button', type: 'trigger' },
             field: { name: '✅ Применить cookie', description: 'Сохранить и проверить сессию' },
             onChange: function () {
-                var ck = (Lampa.Storage.get(STORAGE.cookie) || '').trim();
+                var ck = String(Lampa.Storage.get(STORAGE.cookie) || '').trim();
                 Lampa.Noty.show('Проверяю сессию HDREZKA…');
                 applyManualCookie(ck, function (ok, msg) {
                     Lampa.Noty.show((ok ? '✓ ' : '✗ ') + msg);
@@ -2587,8 +2587,8 @@
             param: { name: 'rezka_login_button', type: 'trigger' },
             field: { name: '✅ Войти в аккаунт', description: 'Сессия будет обновляться автоматически раз в 3 дня' },
             onChange: function () {
-                var login = (Lampa.Storage.get(STORAGE.login) || '').trim();
-                var pwd   = (Lampa.Storage.get(STORAGE.password) || '').trim();
+                var login = String(Lampa.Storage.get(STORAGE.login) || '').trim();
+                var pwd   = String(Lampa.Storage.get(STORAGE.password) || '').trim();
                 if (!login || !pwd) {
                     Lampa.Noty.show('Введите логин и пароль');
                     return;
@@ -2624,7 +2624,7 @@
             onChange: function () {
                 Lampa.Noty.show('HDREZKA: проверяю сессию…');
                 var ck = getCookie() || '';
-                var domain = (Lampa.Storage.get(STORAGE.domain) || DEFAULT_DOMAIN).replace(/\/+$/, '');
+                var domain = getDomain();
                 var url = domain + '/?t=' + Date.now();
                 request({
                     url: url,
@@ -2748,8 +2748,8 @@
      * ==================================================== */
     function maybeAutoRelogin() {
         try {
-            var login = (Lampa.Storage.get(STORAGE.login) || '').trim();
-            var pwd = (Lampa.Storage.get(STORAGE.password) || '').trim();
+            var login = String(Lampa.Storage.get(STORAGE.login) || '').trim();
+            var pwd = String(Lampa.Storage.get(STORAGE.password) || '').trim();
             if (!login || !pwd) {
                 console.log('REZKA', 'auto-relogin: логин/пароль не заданы, пропускаю');
                 return;
