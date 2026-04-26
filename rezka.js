@@ -21,7 +21,7 @@
      * ==================================================== */
     var manifest = {
         type: 'video',
-        version: '1.0.38',
+        version: '1.0.39',
         name: 'HDREZKA',
         description: 'Просмотр фильмов и сериалов с HDREZKA по личному аккаунту',
         component: 'rezka_online'
@@ -287,14 +287,24 @@
         try {
             if (typeof network["native"] === 'function' &&
                 Lampa.Platform && Lampa.Platform.is && Lampa.Platform.is('android')) {
+                console.log('REZKA', 'native attempt url=', opts.url, 'cookie len=', (headers.Cookie || '').length, 'method=', opts.post ? 'POST' : 'GET');
                 network["native"](opts.url, function (data) {
                     var len = (typeof data === 'string') ? data.length : -1;
                     console.log('REZKA', 'native OK len=', len, 'url=', opts.url);
                     origSuccess(data);
                 }, function (a, b) {
                     // fallback на silent в случае ошибки native-стека
-                    console.log('REZKA', 'native fail, falling back to silent', a, b, 'url=', opts.url);
-                    callSilent('native-fail');
+                    var statusCode = (a && a.status) || 0;
+                    console.log('REZKA', 'native fail status=', statusCode, 'msg=', b, 'cookie len=', (headers.Cookie || '').length, 'url=', opts.url);
+                    // v1.0.39: 404 на HTML-странице при отсутствии/истекшем cookie — обычный симптом «режима гостя» на rezka:
+                    // с правильными cookie — 200 + контент; без кук или с битыми — 404 + страница входа.
+                    if (statusCode === 404 && opts.url.indexOf('search.php') === -1 && (headers.Cookie || '').length === 0) {
+                        console.log('REZKA', 'native 404 без cookie — вероятно сессия не применилась. Предлагаю ввести cookie вручную.');
+                        try { Lampa.Noty && Lampa.Noty.show && Lampa.Noty.show('HDREZKA: сессия истекла. Настройки → HDREZKA → Cookie (введите dle_user_id=...; dle_password=...)'); } catch (e2) {}
+                        origError({ status: 401 }, 'login required');
+                        return;
+                    }
+                    callSilent('native-fail-' + statusCode);
                 }, opts.post || false, params);
                 return network;
             }
