@@ -21,7 +21,7 @@
      * ==================================================== */
     var manifest = {
         type: 'video',
-        version: '1.0.22',
+        version: '1.0.23',
         name: 'HDREZKA',
         description: 'Просмотр фильмов и сериалов с HDREZKA по личному аккаунту',
         component: 'rezka_online'
@@ -833,7 +833,11 @@
             }
             var lang = '';
             try { lang = Lampa.Storage.get('tmdb_lang') || Lampa.Storage.get('language') || 'ru'; } catch(e) { lang = 'ru'; }
-            var apiUrl = Lampa.TMDB.api('tv/' + tmdbId + '/season/' + seasonNum + '?language=' + encodeURIComponent(lang));
+            // ВАЖНО: TMDB.api() добавляет только email=, но НЕ api_key. Без api_key — 401.
+            var apiKey = '';
+            try { apiKey = (Lampa.TMDB && typeof Lampa.TMDB.key === 'function') ? Lampa.TMDB.key() : ''; } catch(e) {}
+            var keyParam = apiKey ? ('api_key=' + encodeURIComponent(apiKey) + '&') : '';
+            var apiUrl = Lampa.TMDB.api('tv/' + tmdbId + '/season/' + seasonNum + '?' + keyParam + 'language=' + encodeURIComponent(lang));
             var net = new Lampa.Reguest();
             net.timeout(8000);
             net.silent(apiUrl, function (json) {
@@ -1398,6 +1402,18 @@
                 }
                 if (a.stype === 'voice' && b && typeof b.index !== 'undefined') {
                     state.choice.voice = b.index;
+                    // ПРИ СМЕНЕ ПЕРЕВОДЧИКА: разные переводы покрывают разные сезоны/серии.
+                    // HTML страницы содержит сезоны только для дефолтного переводчика —
+                    // для остальных нужно дозапросить через ajax/get_cdn_series action=get_episodes.
+                    if (info.is_series) {
+                        state.choice.season = 0;
+                        setTimeout(Lampa.Select.close, 10);
+                        reloadEpisodesForVoice(info.voice[state.choice.voice], function () {
+                            buildFilter();
+                            buildList();
+                        });
+                        return;
+                    }
                 } else if (a.stype === 'season' && b && typeof b.index !== 'undefined') {
                     state.choice.season = b.index;
                 }
@@ -1405,6 +1421,75 @@
                 buildFilter();
                 buildList();
             };
+        }
+
+        // Перезагружает info.season и info.episode для выбранного переводчика
+        // через ajax/get_cdn_series action=get_episodes.
+        // Дело в том, что разные переводчики на rezka покрывают разные сезоны
+        // (например Дубляж неоф. у Сериала 31432 есть только для Сезона 5).
+        function reloadEpisodesForVoice(voice, done) {
+            if (!voice || !voice.id || !info.film_id) {
+                console.log('REZKA', 'reloadEpisodesForVoice: пропускаю — нет voice/film_id');
+                done && done();
+                return;
+            }
+            console.log('REZKA', 'reloadEpisodesForVoice tid=' + voice.id + ' film_id=' + info.film_id);
+            var url = proxify(getDomain() + '/ajax/get_cdn_series/?t=' + Date.now());
+            var post = 'id=' + encodeURIComponent(info.film_id) +
+                       '&translator_id=' + encodeURIComponent(voice.id) +
+                       '&favs=' + encodeURIComponent(info.favs || '') +
+                       '&action=get_episodes';
+            request({
+                url: url,
+                post: post,
+                dataType: 'text',
+                headers: {
+                    'Content-Type': 'application/x-www-form-urlencoded',
+                    'Origin': getDomain(),
+                    'Referer': getDomain() + '/'
+                }
+            }, function (resp) {
+                try {
+                    var json = typeof resp === 'string' ? JSON.parse(resp) : resp;
+                    if (!json || !json.success) {
+                        console.log('REZKA', 'reloadEpisodesForVoice fail:', json && json.message);
+                        // Оставим исходные seasons/episodes — пусть пользователь видит бывшие.
+                        done && done();
+                        return;
+                    }
+                    // Разбираем seasons и episodes из ajax-ответа.
+                    var newSeasons = [];
+                    var newEpisodes = [];
+                    var d1 = document.createElement('div');
+                    d1.innerHTML = '<ul>' + (json.seasons || '') + '</ul>';
+                    d1.querySelectorAll('.b-simple_season__item').forEach(function (li) {
+                        newSeasons.push({
+                            name: (li.textContent || '').trim(),
+                            id: li.getAttribute('data-tab_id')
+                        });
+                    });
+                    var d2 = document.createElement('div');
+                    d2.innerHTML = (json.episodes || '');
+                    d2.querySelectorAll('.b-simple_episode__item').forEach(function (li) {
+                        newEpisodes.push({
+                            name: (li.textContent || '').trim(),
+                            season_id: li.getAttribute('data-season_id'),
+                            episode_id: li.getAttribute('data-episode_id')
+                        });
+                    });
+                    if (newSeasons.length) info.season = newSeasons;
+                    if (newEpisodes.length) info.episode = newEpisodes;
+                    console.log('REZKA', 'reloadEpisodesForVoice: получено ' + newSeasons.length + ' сезонов, ' + newEpisodes.length + ' эпизодов');
+                    // Сбросим выбранный сезон на первый из новых.
+                    state.choice.season = 0;
+                } catch (e) {
+                    console.log('REZKA', 'reloadEpisodesForVoice parse error:', e && e.message);
+                }
+                done && done();
+            }, function (xhr, msg) {
+                console.log('REZKA', 'reloadEpisodesForVoice network fail:', msg);
+                done && done();
+            });
         }
 
         // Выбирает индекс дубляжа среди озвучек (дефолт — первая)
