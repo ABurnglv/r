@@ -21,7 +21,7 @@
      * ==================================================== */
     var manifest = {
         type: 'video',
-        version: '1.0.43',
+        version: '1.0.44',
         name: 'HDREZKA',
         description: 'Просмотр фильмов и сериалов с HDREZKA по личному аккаунту',
         component: 'rezka_online'
@@ -311,8 +311,37 @@
                     // CORS-блок) — сразу сообщаем юзеру.
                     if (statusCode === 404 && opts.url.indexOf('search.php') === -1) {
                         var ck = headers.Cookie || '';
+                        // v1.0.44: реактивный перелог.
+                        // Если 404 пришёл на HTML, а у юзера есть логин/пароль —
+                        // сервер скорее всего отклонил протёкший cookie.
+                        // Пробуем тихо перезалогиниться и повторить запрос ровно один раз.
+                        var rl_login = '';
+                        var rl_pwd = '';
+                        try {
+                            rl_login = String(Lampa.Storage.get(STORAGE.login) || '').trim();
+                            rl_pwd = String(Lampa.Storage.get(STORAGE.password) || '').trim();
+                        } catch (eRl) {}
+                        if (rl_login && rl_pwd && !opts._reauth_attempted) {
+                            opts._reauth_attempted = true;
+                            console.log('REZKA', 'native 404 — attempting reactive relogin for', opts.url);
+                            try { Lampa.Noty && Lampa.Noty.show && Lampa.Noty.show('HDREZKA: обновляю сессию...'); } catch (e3) {}
+                            authenticate(rl_login, rl_pwd, function (ok, msg) {
+                                console.log('REZKA', 'reactive relogin result:', ok ? 'OK' : 'FAIL', msg || '');
+                                if (ok) {
+                                    // Повторяем оригинальный запрос с обновлённой сессией.
+                                    // Флаг _reauth_attempted уже стоит — повторного цикла не будет.
+                                    try { Lampa.Noty && Lampa.Noty.show && Lampa.Noty.show('HDREZKA: сессия обновлена, повтор запроса'); } catch (e4) {}
+                                    request(opts, success, error);
+                                } else {
+                                    var failDiag = 'не удалось обновить сессию: ' + (msg || 'unknown');
+                                    try { Lampa.Noty && Lampa.Noty.show && Lampa.Noty.show('HDREZKA: ' + failDiag); } catch (e5) {}
+                                    origError({ status: 401 }, 'reauth failed: ' + (msg || ''));
+                                }
+                            });
+                            return;
+                        }
                         var diag = ck.length === 0
-                            ? 'сессия пуста. Введите cookie в настройках'
+                            ? 'сессия пуста. Введите cookie или логин/пароль в настройках'
                             : 'сервер отклонил cookie (' + ck.length + ' байт). Возьмите свежие на rezka.fi с этого же устройства';
                         console.log('REZKA', 'native 404 on HTML —', diag);
                         try { Lampa.Noty && Lampa.Noty.show && Lampa.Noty.show('HDREZKA: ' + diag); } catch (e2) {}
@@ -345,10 +374,13 @@
     function authenticate(login, password, cb) {
         if (_authInProgress) {
             console.log('REZKA', 'login already in progress, ignoring duplicate click');
+            // v1.0.44: вызываем cb с ошибкой, чтобы вызывающий (например реактивный
+            // 404-перелог) не зависал. Оригинальный процесс всё равно завершится.
+            try { if (typeof cb === 'function') cb(false, 'login already in progress'); } catch (eDup) {}
             return;
         }
         _authInProgress = true;
-        var done = function (ok, msg) { _authInProgress = false; cb(ok, msg); };
+        var done = function (ok, msg) { _authInProgress = false; if (typeof cb === 'function') cb(ok, msg); };
 
         var post = 'login_name=' + encodeURIComponent(login) +
                    '&login_password=' + encodeURIComponent(password) +
