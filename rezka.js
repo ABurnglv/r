@@ -21,7 +21,7 @@
      * ==================================================== */
     var manifest = {
         type: 'video',
-        version: '1.0.27',
+        version: '1.0.28',
         name: 'HDREZKA',
         description: 'Просмотр фильмов и сериалов с HDREZKA по личному аккаунту',
         component: 'rezka_online'
@@ -429,6 +429,9 @@
      *  Search on HDREZKA
      *  GET /engine/ajax/search.php?q=<title>
      * ==================================================== */
+    // searchRezka(query, year, cb)
+    //   year: если задан — фильтрует items по совпадающему году (если есть совпадения)
+    //   year='all' или false/0 — никакого фильтра, возвращает все результаты
     function searchRezka(query, year, cb) {
         var url = proxify(getDomain() + '/engine/ajax/search.php?q=' + encodeURIComponent(query));
         console.log('REZKA', 'search start: query=', query, 'year=', year, 'url=', url);
@@ -451,16 +454,20 @@
                     // без .enty — берём всю строку до «(слово, год)»
                     title = fullText.replace(/\s*\([^)]*\d{4}\)[\s\S]*$/, '').trim();
                 }
+                // Извлекаем хвост в скобках: "(Оригинал, 2023)" или "(2023)"
+                var tailMatch = fullText.match(/\(([^)]*\d{4}[^)]*)\)/);
+                var details = tailMatch ? tailMatch[1].trim() : '';
                 // Год — из любого вхождения (4 цифры 19xx/20xx)
                 var ym = fullText.match(/\b(19|20)\d{2}\b/);
                 items.push({
                     url: href,
                     title: title,
-                    year: ym ? ym[0] : ''
+                    year: ym ? ym[0] : '',
+                    details: details // «Оригинал, 2023» или «Русский, США, 2026»
                 });
             });
-            // если знаем год — предпочитаем точное совпадение
-            if (year) {
+            // если знаем год и не 'all' — предпочитаем точное совпадение
+            if (year && year !== 'all') {
                 var exact = items.filter(function (i) { return i.year == String(year); });
                 if (exact.length) items = exact;
             }
@@ -862,10 +869,16 @@
             var net = new Lampa.Reguest();
             net.timeout(8000);
             net.silent(apiUrl, function (json) {
+                // map: { episode_number: { name, still } } — для отображения имени и персонального постера серии.
                 var map = {};
                 if (json && json.episodes && json.episodes.length) {
                     json.episodes.forEach(function (e) {
-                        if (e && e.episode_number) map[e.episode_number] = e.name || '';
+                        if (e && e.episode_number) {
+                            map[e.episode_number] = {
+                                name: e.name || '',
+                                still: e.still_path ? ('https://image.tmdb.org/t/p/w300' + e.still_path) : ''
+                            };
+                        }
                     });
                 }
                 _tmdbEpCache[key] = map;
@@ -945,7 +958,12 @@
                 },
                 down: function () { Navigator.move('down'); },
                 left: function () { Lampa.Controller.toggle('menu'); },
-                right: function () { Navigator.move('right'); },
+                right: function () {
+                    // Раньше просто двигался вправо по карточкам.
+                    // Ниже: если вправо двигаться некуда — перекидываем фокус на фильтр вверху.
+                    if (Navigator.canmove('right')) { Navigator.move('right'); return; }
+                    try { Lampa.Controller.toggle('head'); } catch (e) {}
+                },
                 back: this.back
             });
             Lampa.Controller.toggle('content');
@@ -973,10 +991,43 @@
         // переписывает data.url = getUrlQuality(data.quality) — выбирая ключ где
         // parseInt(ключ) == Storage.field('video_quality_default') (строка '480'/'720'/'1080'/'1440'/'2160').
         // Ставим этот storage временно перед play(), потом восстанавливаем.
-        var SAVED_VQD = null;
+        // Подписка на изменение video_quality_default в плеере — сохраняем выбор пользователя.
+        // Регистрируется один раз на компонент.
+        var _vqdListenerRegistered = false;
+        function registerQualityListener() {
+            if (_vqdListenerRegistered) return;
+            try {
+                if (!Lampa.Storage.listener || !Lampa.Storage.listener.follow) return;
+                Lampa.Storage.listener.follow('change', function (e) {
+                    if (!e || e.name !== 'video_quality_default') return;
+                    var v = e.value;
+                    var n = parseInt(v, 10);
+                    if (!n || isNaN(n)) return;
+                    // 4096 / огромное число → авто
+                    if (n >= 4096) {
+                        setQualityPref('auto');
+                        console.log('REZKA', 'quality listener: set rezka_quality=auto from VQD=' + v);
+                        return;
+                    }
+                    // Подбираем лучший лейбл из rezka_quality_available — там может быть '1080p Ultra'/'1080p'
+                    var avail = (Lampa.Storage.get('rezka_quality_available', '') || '').split(',').map(function(x){return x.trim();}).filter(Boolean);
+                    var match = '';
+                    for (var i = 0; i < avail.length; i++) {
+                        if (parseInt(avail[i], 10) === n) { match = avail[i]; break; }
+                    }
+                    var label = match || (n + 'p');
+                    setQualityPref(label);
+                    console.log('REZKA', 'quality listener: set rezka_quality=' + label + ' from VQD=' + v);
+                });
+                _vqdListenerRegistered = true;
+            } catch (e) {
+                console.log('REZKA', 'registerQualityListener error', e);
+            }
+        }
+
         function applyQualityToPlayer() {
+            registerQualityListener();
             var qPref = Lampa.Storage.get(STORAGE.quality, 'auto');
-            try { SAVED_VQD = Lampa.Storage.get('video_quality_default', '1080'); } catch (e) {}
             if (qPref && qPref !== 'auto') {
                 var n = parseInt(qPref, 10) || 0;
                 if (n) {
@@ -988,13 +1039,7 @@
                 try { Lampa.Storage.set('video_quality_default', '4096'); } catch (e) {}
                 console.log('REZKA', 'applyQualityToPlayer set video_quality_default=4096 (auto)');
             }
-            // Восстановим исходное значение через 30с — Lampa.Player уже прочитает его в play()
-            setTimeout(function () {
-                if (SAVED_VQD !== null) {
-                    try { Lampa.Storage.set('video_quality_default', SAVED_VQD); } catch (e) {}
-                    SAVED_VQD = null;
-                }
-            }, 30000);
+            // SAVED_VQD restore удалён в v1.0.28 — он перетирал выбор пользователя в плеере.
         }
 
         // ====================================================================
@@ -1263,21 +1308,32 @@
                 var origTitleS = (object.movie.original_name || object.movie.original_title || movieTitle || '');
                 var sNumGlobal = season ? (parseInt(season.id, 10) || 0) : 0;
                 var renderedCards = []; // [{card, ep, idx}] — для дообновления имён из TMDB
+                // Проверяем кеш TMDB ДО отрисовки — если имена уже есть, выведём их сразу (без мелькания "Серия N").
+                var cachedMap = (sNumGlobal && object.movie && object.movie.id)
+                    ? _tmdbEpCache[object.movie.id + ':' + sNumGlobal]
+                    : null;
                 items.forEach(function (ep, epIdx) {
                     // Hash каждой серии индивидуален (формула lampac):
                     // [season_number, ':' если season>10, episode_number, original_title]
                     var sNum = parseInt(ep.season_id || season.id, 10) || 0;
                     var eNum = parseInt(ep.episode_id || ep.name, 10) || 0;
                     var hash = strHash([sNum, sNum > 10 ? ':' : '', eNum, origTitleS].join(''));
-                    // Базовый title с резервным именем (будет обновлён после TMDB)
-                    var baseTitle = 'Серия ' + eNum;
+                    // Имя серии: берём из кеша TMDB сразу если есть, или из ранее сохранённого ep.tmdb_name.
+                    // Иначе — фолбэк "Серия N" до результата асинхронного fetchTMDBEpisodes.
+                    var cachedEntry = cachedMap && cachedMap[eNum];
+                    var initialName = (cachedEntry && cachedEntry.name) || ep.tmdb_name || ('Серия ' + eNum);
+                    var initialPoster = (cachedEntry && cachedEntry.still) || ep.tmdb_still || poster;
+                    if (cachedEntry) {
+                        if (cachedEntry.name) ep.tmdb_name = cachedEntry.name;
+                        if (cachedEntry.still) ep.tmdb_still = cachedEntry.still;
+                    }
                     var card = makePrestigeCard({
-                        title: baseTitle,
+                        title: initialName,
                         time: episodeRuntime,
                         info: [voice.name, season.name],
                         quality: qualityLabel,
                         hash: hash,
-                        poster: poster,
+                        poster: initialPoster,
                         tagline: tagline
                     });
                     var tl = card.data('timeline');
@@ -1291,18 +1347,30 @@
                 if (!items.length) {
                     html.append('<div style="padding:1em;color:#ccc">Без серий в этом сезоне</div>');
                 }
-                // Доподгружаем имена из TMDB и обновляем текст карточек (без ререндера)
+                // Доподгружаем имена и постеры из TMDB. Если ответ был в кеше — коллбэк выполнится синхронно и это нооп.
                 if (renderedCards.length && object.movie && object.movie.id && sNumGlobal) {
                     fetchTMDBEpisodes(object.movie.id, sNumGlobal, function (nameMap) {
                         if (!nameMap) return;
                         renderedCards.forEach(function (rc) {
-                            var nm = nameMap[rc.eNum];
+                            var entry = nameMap[rc.eNum];
+                            if (!entry) return;
+                            var nm = entry.name;
+                            var still = entry.still;
                             if (nm) {
                                 rc.ep.tmdb_name = nm; // сохраним в ep — playSeries возьмёт оттуда
                                 try {
                                     var titleEl = rc.card.find('.rezka-prestige__title, .online__title').first();
                                     if (titleEl.length) titleEl.text(nm);
                                 } catch (e) {}
+                            }
+                            if (still && still !== rc.ep.tmdb_still) {
+                                rc.ep.tmdb_still = still;
+                                try {
+                                    var imgWrap = rc.card.find('.rezka-prestige__img');
+                                    var img = imgWrap.find('img');
+                                    img.off('load').on('load', function () { imgWrap.addClass('rezka-prestige__img--loaded'); });
+                                    img.attr('src', still);
+                                } catch (e2) {}
                             }
                         });
                     });
@@ -1585,19 +1653,25 @@
             var year = (movie.release_date || movie.first_air_date || '').slice(0, 4);
             console.log('REZKA', 'component initialize. movie.title=', title, 'year=', year, 'domain=', getDomain(), 'logged=', isLoggedIn());
 
-            searchRezka(title, year, function (results) {
-                if (!results.length) {
-                    self.activity.loader(false);
-                    showError('Ничего не найдено на HDREZKA');
-                    self.activity.toggle();
-                    return;
-                }
-                fetchFilmPage(results[0].url, function (info) {
+            // Внутренняя: обрабатываем info после fetchFilmPage — выделено в v1.0.28 для повторного использования при rezka_url override
+            var onFilmInfo = function (info) {
                     state.info = info;
                     state.choice.voice = pickDefaultVoiceIdx(info.voice);
                     // Для сериала — выбираем последний сезон по умолчанию
                     if (info.is_series && info.season.length) {
                         state.choice.season = info.season.length - 1;
+                        // Предзагружаем TMDB-имена/постеры всех сезонов в фоне
+                        // — при переключении сезона карточки сразу покажут имена без мелькания "Серия N".
+                        if (object.movie && object.movie.id) {
+                            try {
+                                info.season.forEach(function (s, idx) {
+                                    var sNum = parseInt(s.id, 10) || (idx + 1);
+                                    setTimeout(function () {
+                                        fetchTMDBEpisodes(object.movie.id, sNum, function () {});
+                                    }, idx * 80); // лёгкий stagger — не ложим TMDB одновременными запросами
+                                });
+                            } catch (e) { console.log('REZKA', 'TMDB prefetch error:', e && e.message); }
+                        }
                     }
                     self.activity.loader(false);
                     // ФИЛЬМ (не сериал): пользователь нажал «HDREZKA» и ожидает немедленного воспроизведения.
@@ -1628,7 +1702,8 @@
                     buildFilter();
                     buildList();
                     self.activity.toggle();
-                }, function (xhr, msg) {
+            };
+            var onFilmErr = function (xhr, msg) {
                     self.activity.loader(false);
                     var status = (xhr && xhr.status) || 0;
                     var text;
@@ -1639,7 +1714,23 @@
                     }
                     showError(text);
                     self.activity.toggle();
-                });
+            };
+
+            // v1.0.28 §5: если пользователь выбрал конкретный вариант в chooser — пропускаем поиск, идём прямо на URL
+            if (object.rezka_url) {
+                console.log('REZKA', 'initialize: using preselected rezka_url=', object.rezka_url);
+                fetchFilmPage(object.rezka_url, onFilmInfo, onFilmErr);
+                return;
+            }
+
+            searchRezka(title, year, function (results) {
+                if (!results.length) {
+                    self.activity.loader(false);
+                    showError('Ничего не найдено на HDREZKA');
+                    self.activity.toggle();
+                    return;
+                }
+                fetchFilmPage(results[0].url, onFilmInfo, onFilmErr);
             });
         };
     }
@@ -1706,17 +1797,87 @@
         }
     }
 
-    function openRezka(movie) {
+    function openRezka(movie, opts) {
+        opts = opts || {};
         var name = movie.title || movie.name || '';
-        Lampa.Activity.push({
+        var titleSuffix = opts.titleSuffix ? ' • ' + opts.titleSuffix : '';
+        var act = {
             url: '',
-            title: 'HDREZKA - ' + name,
+            title: 'HDREZKA - ' + name + titleSuffix,
             component: 'rezka_online',
             search: name,            // выводится в лупе фильтра
             search_one: name,
             search_two: movie.original_title || movie.original_name || '',
             movie: movie,
             page: 1
+        };
+        if (opts.rezka_url) act.rezka_url = opts.rezka_url;
+        Lampa.Activity.push(act);
+    }
+
+    /* ====================================================
+     *  v1.0.28 §5: long-press chooser — показываем все варианты и окно поиска.
+     *  Поиск без фильтра по году (year='all'), чтобы увидеть все версии (Мумия 1999/2026/etc).
+     * ==================================================== */
+    function chooserFor(movie) {
+        var name = movie.title || movie.name || '';
+        var origName = movie.original_title || movie.original_name || '';
+
+        function showResults(query, results) {
+            if (!results.length) {
+                Lampa.Noty.show('HDREZKA: ничего не найдено по «' + query + '»');
+                openSearchInput();
+                return;
+            }
+            var items = [];
+            // Первым пунктом — ввод другого запроса
+            items.push({ title: '🔍 Другой запрос…', __search: true });
+            results.forEach(function (r) {
+                var subtitle = r.details ? r.details : (r.year || '');
+                items.push({ title: r.title + (r.year ? '  (' + r.year + ')' : ''), subtitle: subtitle, __res: r });
+            });
+            Lampa.Select.show({
+                title: 'HDREZKA: выберите вариант',
+                items: items,
+                onBack: function () { Lampa.Controller.toggle('content'); },
+                onSelect: function (a) {
+                    if (a.__search) { openSearchInput(); return; }
+                    var r = a.__res;
+                    console.log('REZKA', 'chooser: selected url=', r.url, 'title=', r.title, 'year=', r.year);
+                    openRezka(movie, { rezka_url: r.url, titleSuffix: r.title + (r.year ? ' ' + r.year : '') });
+                }
+            });
+        }
+
+        function openSearchInput() {
+            var initial = name;
+            try {
+                Lampa.Input.edit({
+                    free: true,
+                    nosave: true,
+                    value: initial,
+                    title: 'HDREZKA — поиск',
+                    layout: 'full'
+                }, function (val) {
+                    val = (val || '').trim();
+                    if (!val) { Lampa.Controller.toggle('content'); return; }
+                    Lampa.Noty.show('HDREZKA: ищу «' + val + '»…');
+                    searchRezka(val, 'all', function (results) { showResults(val, results); });
+                });
+            } catch (e) {
+                console.log('REZKA', 'Input.edit unavailable, fallback', e && e.message);
+                searchRezka(name, 'all', function (results) { showResults(name, results); });
+            }
+        }
+
+        // Старт — ищем по основному названию, потом по оригинальному если пусто
+        Lampa.Noty.show('HDREZKA: ищу все варианты…');
+        searchRezka(name, 'all', function (results) {
+            if (!results.length && origName && origName !== name) {
+                searchRezka(origName, 'all', function (r2) { showResults(origName, r2); });
+            } else {
+                showResults(name, results);
+            }
         });
     }
 
@@ -1760,6 +1921,11 @@
             // Используем универсальный класс selector — Lampa сама подхватит фокус
             var btn = $('<div class="full-start__button selector view--online view--rezka">' + label + '</div>');
             btn.on('hover:enter', function () { openRezka(movie); });
+            // v1.0.28 §5: долгое нажатие → chooser вариантов + поиск
+            btn.on('hover:long', function () {
+                console.log('REZKA', 'green button long-press → chooser');
+                chooserFor(movie);
+            });
             return btn;
         }
 
