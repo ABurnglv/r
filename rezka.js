@@ -21,7 +21,7 @@
      * ==================================================== */
     var manifest = {
         type: 'video',
-        version: '1.0.26',
+        version: '1.0.27',
         name: 'HDREZKA',
         description: 'Просмотр фильмов и сериалов с HDREZKA по личному аккаунту',
         component: 'rezka_online'
@@ -497,13 +497,22 @@
                 page_url: filmUrl
             };
 
-            // film id
-            var idm = str.match(/initCDN(?:Series|Movies)Events\(\s*(\d+)\s*,\s*(\d+)\s*,\s*([01])\s*,\s*([01])\s*(?:,\s*([01]))?/);
+            // film id. Сигнатура rezka:
+            //   initCDNMoviesEvents(film_id, translator_id, is_camrip[0|1], is_ads[0|1], is_director[0|1])
+            //   initCDNSeriesEvents(film_id, translator_id, def_season, def_episode, false, 'host', ...)
+            // Сериальный вариант НЕ ограничен [0|1] на 3-й/4-й позиции —
+            // там лежат номера сезона/серии. Берём любые числа.
+            var idm = str.match(/initCDN(?:Series|Movies)Events\(\s*(\d+)\s*,\s*(\d+)(?:\s*,\s*(\d+)\s*,\s*(\d+)(?:\s*,\s*(\d+|true|false))?)?/);
             if (idm) {
                 info.film_id = idm[1];
                 var defVoiceId = idm[2];
                 info.is_series = /initCDNSeriesEvents/.test(str);
-                var camrip = idm[3], ads = idm[4], director = idm[5] || '0';
+                // Для фильмов: idm[3..5] = camrip/ads/director (всегда 0 или 1).
+                // Для сериалов: idm[3..4] = def_season/def_episode — camrip/ads не используются.
+                var isOneOrZero = function (v) { return v === '0' || v === '1'; };
+                var camrip = (info.is_series ? '0' : (idm[3] || '0'));
+                var ads = (info.is_series ? '0' : (idm[4] || '0'));
+                var director = (info.is_series ? '0' : (idm[5] && isOneOrZero(idm[5]) ? idm[5] : '0'));
 
                 // favs hash
                 var fm = str.match(/var\s+sof\s*=.*?\.send\([^,]+,\s*'([^']+)'/);
