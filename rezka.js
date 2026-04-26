@@ -21,7 +21,7 @@
      * ==================================================== */
     var manifest = {
         type: 'video',
-        version: '1.0.30',
+        version: '1.0.31',
         name: 'HDREZKA',
         description: 'Просмотр фильмов и сериалов с HDREZKA по личному аккаунту',
         component: 'rezka_online'
@@ -1016,10 +1016,9 @@
         }
 
         // ====================================================================
-        // playFilm: для фильма строит playlist из ВСЕХ озвучек.
-        // Первая воспроизводимая = выбранная по умолчанию (defIdx).
-        // Остальные грузят URL лениво по выбору в плейлисте плеера.
-        // Все entries разделяют один и тот же timeline (прогресс фильма общий).
+        // playFilm: для фильма запускает выбранную озвучку и прикрепляет
+        // voiceovers → кнопка «Дорожки» в плеере покажет список озвучек (единый UX с сериалами).
+        // Плейлист не создаём — в фильме он лишний (одно и то же видео с разными озвучками).
         // ====================================================================
         function playFilm(info, defIdx) {
             if (!info.voice || !info.voice.length) {
@@ -1034,51 +1033,56 @@
             var sharedTimeline = null;
             try { if (Lampa.Timeline) sharedTimeline = Lampa.Timeline.view(hash); } catch (e) {}
 
+            var curVoice = info.voice[defIdx];
+
             Lampa.Modal.open({
                 title: 'HDREZKA',
-                html: $('<div style="padding:1em">Получаем ссылку (' + escapeHTML(info.voice[defIdx].name) + ')…</div>'),
+                html: $('<div style="padding:1em">Получаем ссылку (' + escapeHTML(curVoice.name) + ')…</div>'),
                 size: 'small',
                 onBack: function () { Lampa.Modal.close(); Lampa.Controller.toggle('content'); }
             });
 
-            getStream(info, info.voice[defIdx], null, null,
+            getStream(info, curVoice, null, null,
                 function (firstData) {
                     Lampa.Modal.close();
                     applyQualityToPlayer();
-                    // Строим playlist: одна запись на каждую озвучку
-                    var playlist = info.voice.map(function (v, i) {
-                        var cell = {
-                            title: movieTitle + ' — ' + v.name,
-                            voice_name: v.name
-                        };
-                        if (sharedTimeline) cell.timeline = sharedTimeline;
-                        if (i === defIdx) {
-                            cell.url = firstData.file;
-                            cell.quality = firstData.quality;
-                            cell.subtitles = firstData.subtitles;
-                        } else {
-                            // Ленивая загрузка при выборе в плеере
-                            cell.url = function (call) {
-                                getStream(info, v, null, null,
-                                    function (data) {
-                                        cell.url = data.file;
-                                        cell.quality = data.quality;
-                                        cell.subtitles = data.subtitles;
-                                        call();
-                                    },
-                                    function () {
-                                        cell.url = '';
-                                        Lampa.Noty.show('HDREZKA: не удалось получить ссылку');
-                                        call();
-                                    });
-                            };
-                        }
-                        return cell;
-                    });
-                    var first = playlist[defIdx];
-                    first.playlist = playlist;
-                    Lampa.Player.play(first);
-                    Lampa.Player.playlist(playlist);
+                    var item = {
+                        title: movieTitle + ' — ' + curVoice.name,
+                        url: firstData.file,
+                        quality: firstData.quality,
+                        subtitles: firstData.subtitles,
+                        voice_name: curVoice.name
+                    };
+                    if (sharedTimeline) item.timeline = sharedTimeline;
+
+                    // Дорожки озвучки → кнопка «Дорожки» в плеере.
+                    if (info.voice.length > 1) {
+                        try {
+                            var voiceovers = info.voice.map(function (v, vi) {
+                                return {
+                                    label: v.name,
+                                    title: v.name,
+                                    language: v.name,
+                                    index: vi,
+                                    selected: vi === defIdx,
+                                    enabled:  vi === defIdx,
+                                    onSelect: function () {
+                                        if (vi === defIdx) return;
+                                        console.log('REZKA', 'film voice change in player:', curVoice.name, '->', v.name);
+                                        Lampa.Noty.show('HDREZKA: переключаю на «' + v.name + '»…');
+                                        try { Lampa.Player.close(); } catch (e) {}
+                                        // Обновляем выбор в state, чтобы фильтр в карточном UI отражал актуальное.
+                                        try { state.choice.voice = vi; } catch (e) {}
+                                        setTimeout(function () { playFilm(info, vi); }, 200);
+                                    }
+                                };
+                            });
+                            item.voiceovers = voiceovers;
+                        } catch (e) { console.log('REZKA', 'film voiceovers attach error', e && e.message); }
+                    }
+
+                    Lampa.Player.play(item);
+                    // Без Lampa.Player.playlist() — плейлист фильму не нужен.
                 },
                 function (msg) {
                     Lampa.Modal.close();
@@ -1177,6 +1181,7 @@
                                         try { Lampa.Player.close(); } catch (e) {}
                                         // Обновляем voice + серии для этой озвучки (может потребоваться get_episodes для другого переводчика)
                                         try { state.choice.voice = vi; } catch (e) {}
+                                        var _replay = function () {
                                         if (typeof reloadEpisodesForVoice === 'function') {
                                             reloadEpisodesForVoice(v, season.id, function () {
                                                 try {
@@ -1192,6 +1197,8 @@
                                         } else {
                                             playSeries(info, v, season, items, curEpIdx);
                                         }
+                                        };
+                                        setTimeout(_replay, 200);
                                     }
                                 };
                             });
