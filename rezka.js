@@ -21,7 +21,7 @@
      * ==================================================== */
     var manifest = {
         type: 'video',
-        version: '1.0.35',
+        version: '1.0.36',
         name: 'HDREZKA',
         description: 'Просмотр фильмов и сериалов с HDREZKA по личному аккаунту',
         component: 'rezka_online'
@@ -1422,6 +1422,16 @@
                     card.on('hover:focus', function (e) {
                         try { scroll.update($(e.target), true); } catch (er) {}
                     });
+                    // v1.0.36: длинное нажатие — меню действий (как в modss).
+                    (function (epHashL, epIdxL) {
+                        card.on('hover:long', function () {
+                            openCardActionMenu({
+                                hash: epHashL,
+                                playFn: function () { playSeries(info, voice, season, items, epIdxL); }
+                                // url: не знаем до запуска — без Speedtest/Копирования
+                            });
+                        });
+                    })(hash, epIdx);
                     html.append(card);
                     renderedCards.push({ card: card, ep: ep, idx: epIdx, eNum: eNum });
                 });
@@ -1509,6 +1519,13 @@
                     card.on('hover:focus', function (e) {
                         try { scroll.update($(e.target), true); } catch (er) {}
                     });
+                    // v1.0.36: длинное нажатие — меню действий.
+                    card.on('hover:long', function () {
+                        openCardActionMenu({
+                            hash: hash,
+                            playFn: function () { playFilm(info, defIdx); }
+                        });
+                    });
                     html.append(card);
                 })();
                 if (!info.voice.length) {
@@ -1544,6 +1561,110 @@
         }
         function getQualityPref() { return getQualityFor(curFilmId()); }
         function setQualityPref(q) { setQualityFor(curFilmId(), q); }
+
+        /* ====================================================
+         *  v1.0.36: Меню действий при длинном нажатии (hover:long) на карточку.
+         *  Повторяет стандартное меню Lampa (как в modss/torrents):
+         *  - Запустить плеер - Android / WebOS / Lampa
+         *  - Тестировать скорость (если известен url)
+         *  - Пометить / Снять отметку (timefull)
+         *  - Сбросить тайм-код (timeclear)
+         *
+         *  Параметры:
+         *  - hash: индивидуальный hash дль Timeline (для фильма или серии)
+         *  - playFn: функция-запуск (playFilm/playSeries) для "Запустить плеер"
+         * ==================================================== */
+        function openCardActionMenu(opts) {
+            try {
+                var hash = opts.hash;
+                var playFn = opts.playFn;
+                var url = opts.url || '';   // для Speedtest и копирования — может отсутствовать до первого воспроизведения
+                var view = (Lampa.Timeline && Lampa.Timeline.view) ? Lampa.Timeline.view(hash) : { percent: 0, time: 0, duration: 0 };
+                var enabled = (Lampa.Controller && Lampa.Controller.enabled) ? Lampa.Controller.enabled().name : 'content';
+
+                var T = function (k, fb) {
+                    try { var s = Lampa.Lang.translate(k); return s && s !== k ? s : (fb || k); } catch (e) { return fb || k; }
+                };
+
+                var menu = [];
+
+                // Плееры
+                if (Lampa.Platform.is('android')) {
+                    menu.push({ title: T('player_lauch', 'Запустить плеер') + ' - Android', player: 'android' });
+                }
+                if (Lampa.Platform.is('webos')) {
+                    menu.push({ title: T('player_lauch', 'Запустить плеер') + ' - WebOS', player: 'webos' });
+                }
+                menu.push({ title: T('player_lauch', 'Запустить плеер') + ' - Lampa', player: 'lampa' });
+
+                // Speedtest — только если есть url и Lampa.Speedtest
+                if (url && Lampa.Speedtest && Lampa.Speedtest.show) {
+                    menu.push({ title: T('speedtest_button', 'Тестировать скорость'), speedtest: true });
+                }
+
+                // Раздел: просмотр
+                if (view.percent && view.percent >= 100) {
+                    menu.push({ title: T('torrent_parser_label_cancel_title', 'Снять отметку'), timeclear: true });
+                } else {
+                    menu.push({ title: T('torrent_parser_label_title', 'Пометить'), timefull: true });
+                }
+                if (view.percent && view.percent > 0 && view.percent < 100) {
+                    menu.push({ title: T('time_reset', 'Сбросить тайм-код'), timeclear: true });
+                }
+
+                // Копирование ссылки — только если есть url
+                if (url) {
+                    menu.push({ title: T('copy_link', 'Копировать ссылку на видео'), link: true });
+                }
+
+                Lampa.Select.show({
+                    title: T('title_action', 'Действие'),
+                    items: menu,
+                    onBack: function () {
+                        try { Lampa.Controller.toggle(enabled); } catch (e) {}
+                    },
+                    onSelect: function (a) {
+                        try {
+                            if (a.timeclear) {
+                                view.percent = 0; view.time = 0; view.duration = 0;
+                                if (Lampa.Timeline && Lampa.Timeline.update) Lampa.Timeline.update(view);
+                                Lampa.Noty.show('HDREZKA: тайм-код сброшен');
+                            }
+                            if (a.timefull) {
+                                view.percent = 100; view.time = view.duration || 0;
+                                if (Lampa.Timeline && Lampa.Timeline.update) Lampa.Timeline.update(view);
+                                Lampa.Noty.show('HDREZKA: помечено как просмотренное');
+                            }
+                            if (a.link && url) {
+                                Lampa.Utils.copyTextToClipboard(url, function () {
+                                    Lampa.Noty.show('Ссылка скопирована');
+                                }, function () {
+                                    Lampa.Noty.show('Не удалось скопировать');
+                                });
+                            }
+                            if (a.speedtest && url && Lampa.Speedtest && Lampa.Speedtest.show) {
+                                Lampa.Speedtest.show({ url: url });
+                                return; // Speedtest сам разберётся с controller
+                            }
+                            try { Lampa.Controller.toggle(enabled); } catch (e) {}
+                            if (a.player) {
+                                // Ставим выбранный плеер и запускаем
+                                try { Lampa.Player.runas(a.player); } catch (e) {}
+                                if (typeof playFn === 'function') playFn();
+                            }
+                            // Перерисовываем карточку — обновится полоса прогресса.
+                            if (a.timeclear || a.timefull) {
+                                try { buildList(); } catch (e) {}
+                            }
+                        } catch (e) {
+                            console.log('REZKA', 'action menu select error:', e && e.message);
+                        }
+                    }
+                });
+            } catch (e) {
+                console.log('REZKA', 'openCardActionMenu error:', e && e.message);
+            }
+        }
 
         function buildFilter() {
             if (!state.info) return;
