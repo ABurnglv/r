@@ -21,7 +21,7 @@
      * ==================================================== */
     var manifest = {
         type: 'video',
-        version: '1.0.42',
+        version: '1.0.43',
         name: 'HDREZKA',
         description: 'Просмотр фильмов и сериалов с HDREZKA по личному аккаунту',
         component: 'rezka_online'
@@ -477,7 +477,12 @@
                 //   data-uid="\d+" — идентификатор юзера
                 //   <div class="b-user-section" — личный блок
                 //   /logout/ — кнопка выхода
-                var loggedHints = /href="\/(?:logout|user)\/|class="b-user-section|data-uid="\d+"|<a[^>]+class="b-topnav__layer-controls__logout"|name="action"\s+value="logout"/i;
+                // Надёжные маркеры залогиненного юзера (проверены на rezka.fi):
+                //   • /logout/ — ссылка выхода (абсолютная или относительная)
+                //   • dle_login_hash — CSRF-токен, выдаётся только авторизованным
+                //   • logout=yes — query в любой форме выхода
+                var loggedHints = /\/logout\/|dle_login_hash|logout=yes|action="logout"/i;
+                // Страница входа:
                 var loginHints = /<title>\s*Вход\s*<\/title>|id="login_name"|action="\/ajax\/login\/"/i;
                 if (loggedHints.test(s)) cb(true, 'OkHttp jar');
                 else if (loginHints.test(s)) cb(false, 'server returned login page');
@@ -522,7 +527,8 @@
                  ? net['native'] : net.silent;
         fn.call(net, url, function (html) {
             var s = String(html || '').slice(0, 30000);
-            var loggedHints = /href="\/(?:logout|user)\/|class="b-user-section|data-uid="\d+"|name="action"\s+value="logout"/i;
+            // Аналогичные маркеры в applyManualCookie
+            var loggedHints = /\/logout\/|dle_login_hash|logout=yes|action="logout"/i;
             var loginHints = /<title>\s*Вход\s*<\/title>|id="login_name"|action="\/ajax\/login\/"/i;
             if (loggedHints.test(s)) cb(true, '🟢 Сессия активна — HDREZKA готова');
             else if (loginHints.test(s)) cb(false, 'Cookie сохранён, но сервер всё ещё показывает вход. Проверьте dle_user_id/dle_password или возьмите свежие из браузера.');
