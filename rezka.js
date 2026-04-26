@@ -21,7 +21,7 @@
      * ==================================================== */
     var manifest = {
         type: 'video',
-        version: '1.0.48',
+        version: '1.0.49',
         name: 'HDREZKA',
         description: 'Просмотр фильмов и сериалов с HDREZKA по личному аккаунту',
         component: 'rezka_online'
@@ -1224,6 +1224,34 @@
         }
 
         // ====================================================================
+        // v1.0.49: вспомогательные функции «история + сохранение фокуса перед плеером».
+        // ====================================================================
+        // Добавляет фильм/сериал в историю смотрения Самой Lampa (синхронизация с «Последнее»).
+        function addToLampaHistory() {
+            try {
+                if (Lampa.Favorite && typeof Lampa.Favorite.add === 'function' && object.movie) {
+                    Lampa.Favorite.add('history', object.movie, 100);
+                    console.log('REZKA', 'added to Lampa history:', object.movie.id, object.movie.title || object.movie.name);
+                }
+            } catch (e) { console.log('REZKA', 'Favorite.add error', e && e.message); }
+        }
+        // Сохраняет индекс текущей сфокусированной серии/фильма в _savedFocusIdx.
+        // После выхода из плеера toggle()-обработчик вернёт фокус на ту же карточку.
+        function rememberCurrentFocus() {
+            try {
+                var $sel = scroll.render().find('.selector');
+                var $focused = scroll.render().find('.focus').first();
+                if ($focused.length && $sel.length) {
+                    var idx = $sel.index($focused);
+                    if (idx >= 0) {
+                        self._savedFocusIdx = idx;
+                        console.log('REZKA', 'remembered focus idx=' + idx + ' before player');
+                    }
+                }
+            } catch (e) { /* noop */ }
+        }
+
+        // ====================================================================
         // playFilm: для фильма запускает выбранную озвучку и прикрепляет
         // voiceovers → кнопка «Дорожки» в плеере покажет список озвучек (единый UX с сериалами).
         // Плейлист не создаём — в фильме он лишний (одно и то же видео с разными озвучками).
@@ -1235,6 +1263,7 @@
             }
             // v1.0.32: запоминаем filmId — global quality listener будет писать per-film.
             try { window._rezkaCurrentFilmId = curFilmId(); } catch (e) {}
+            addToLampaHistory();
             defIdx = (typeof defIdx === 'number' && defIdx >= 0) ? defIdx : 0;
             if (defIdx >= info.voice.length) defIdx = 0;
             var movieTitle = (object.movie.title || object.movie.name || '');
@@ -1310,6 +1339,7 @@
             if (!items || !items.length) { Lampa.Noty.show('HDREZKA: нет серий'); return; }
             // v1.0.32: запоминаем filmId — для global quality listener.
             try { window._rezkaCurrentFilmId = curFilmId(); } catch (e) {}
+            addToLampaHistory();
             epIdx = (typeof epIdx === 'number' && epIdx >= 0 && epIdx < items.length) ? epIdx : 0;
             var movieTitle = (object.movie.title || object.movie.name || '');
             var origTitle = (object.movie.original_name || object.movie.original_title || movieTitle || '');
@@ -1590,7 +1620,7 @@
                         tagline: tagline
                     });
                     var tl = card.data('timeline');
-                    card.on('hover:enter', function () { playSeries(info, voice, season, items, epIdx); });
+                    card.on('hover:enter', function () { rememberCurrentFocus(); playSeries(info, voice, season, items, epIdx); });
                     card.on('hover:focus', function (e) {
                         try { scroll.update($(e.target), true); } catch (er) {}
                     });
@@ -1686,6 +1716,7 @@
                     });
                     var tl = card.data('timeline');
                     card.on('hover:enter', function () {
+                        rememberCurrentFocus();
                         playFilm(info, defIdx);
                     });
                     card.on('hover:focus', function (e) {
