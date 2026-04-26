@@ -21,7 +21,7 @@
      * ==================================================== */
     var manifest = {
         type: 'video',
-        version: '1.0.39',
+        version: '1.0.40',
         name: 'HDREZKA',
         description: 'Просмотр фильмов и сериалов с HDREZKA по личному аккаунту',
         component: 'rezka_online'
@@ -296,12 +296,20 @@
                     // fallback на silent в случае ошибки native-стека
                     var statusCode = (a && a.status) || 0;
                     console.log('REZKA', 'native fail status=', statusCode, 'msg=', b, 'cookie len=', (headers.Cookie || '').length, 'url=', opts.url);
-                    // v1.0.39: 404 на HTML-странице при отсутствии/истекшем cookie — обычный симптом «режима гостя» на rezka:
-                    // с правильными cookie — 200 + контент; без кук или с битыми — 404 + страница входа.
-                    if (statusCode === 404 && opts.url.indexOf('search.php') === -1 && (headers.Cookie || '').length === 0) {
-                        console.log('REZKA', 'native 404 без cookie — вероятно сессия не применилась. Предлагаю ввести cookie вручную.');
-                        try { Lampa.Noty && Lampa.Noty.show && Lampa.Noty.show('HDREZKA: сессия истекла. Настройки → HDREZKA → Cookie (введите dle_user_id=...; dle_password=...)'); } catch (e2) {}
-                        origError({ status: 401 }, 'login required');
+                    // v1.0.40: 404 на HTML-странице (не search) — это сервер rezka.fi отверг сессию:
+                    //   • cookie len = 0     → cookie не выставлен
+                    //   • cookie len > 0     → cookie выставлен, но сервер его не принял
+                    //     (протёк, IP-binding, битый, и т.д.)
+                    // В обоих случаях silent fallback бесполезен (в браузере Lampa-Web сработает
+                    // CORS-блок) — сразу сообщаем юзеру.
+                    if (statusCode === 404 && opts.url.indexOf('search.php') === -1) {
+                        var ck = headers.Cookie || '';
+                        var diag = ck.length === 0
+                            ? 'сессия пуста. Введите cookie в настройках'
+                            : 'сервер отклонил cookie (' + ck.length + ' байт). Возьмите свежие на rezka.fi с этого же устройства';
+                        console.log('REZKA', 'native 404 on HTML —', diag);
+                        try { Lampa.Noty && Lampa.Noty.show && Lampa.Noty.show('HDREZKA: ' + diag); } catch (e2) {}
+                        origError({ status: 401 }, 'login required: ' + diag);
                         return;
                     }
                     callSilent('native-fail-' + statusCode);
@@ -2560,6 +2568,35 @@
             field: {
                 name: 'CORS-прокси (опц.)',
                 description: 'Если HDREZKA блокируется CORS, можно указать прокси, например https://your-proxy.com/'
+            }
+        });
+
+        Lampa.SettingsApi.addParam({
+            component: 'rezka',
+            param: { name: 'rezka_test_session_button', type: 'trigger' },
+            field: { name: 'Проверить сессию', description: 'Делает запрос к HDREZKA и показывает HTTP-код + наличие маркеров логина' },
+            onChange: function () {
+                Lampa.Noty.show('HDREZKA: проверяю сессию…');
+                var ck = getCookie() || '';
+                var domain = (Lampa.Storage.get(STORAGE.domain) || DEFAULT_DOMAIN).replace(/\/+$/, '');
+                var url = domain + '/?t=' + Date.now();
+                request({
+                    url: url,
+                    timeout: 15000,
+                    success: function (html) {
+                        var html_str = String(html || '');
+                        var len = html_str.length;
+                        var lower = html_str.toLowerCase();
+                        var hasLogout = lower.indexOf('logout=yes') !== -1 || lower.indexOf('exituser') !== -1;
+                        var hasLogin = lower.indexOf('<title>вход') !== -1 || lower.indexOf('login_name') !== -1;
+                        var status = hasLogout ? '✓ авторизован' : (hasLogin ? '✗ страница входа (cookie не принят)' : '? непонятный ответ');
+                        Lampa.Noty.show('HDREZKA: 200 OK, ' + len + ' байт, cookie=' + ck.length + ' — ' + status);
+                    },
+                    error: function (xhr, msg) {
+                        var st = (xhr && xhr.status) || 0;
+                        Lampa.Noty.show('HDREZKA: ошибка ' + st + ', cookie=' + ck.length + ' — ' + (msg || 'нет ответа'));
+                    }
+                });
             }
         });
     }
