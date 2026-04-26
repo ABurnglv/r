@@ -21,7 +21,7 @@
      * ==================================================== */
     var manifest = {
         type: 'video',
-        version: '1.0.32',
+        version: '1.0.33',
         name: 'HDREZKA',
         description: 'Просмотр фильмов и сериалов с HDREZKA по личному аккаунту',
         component: 'rezka_online'
@@ -2262,50 +2262,65 @@
     }
 
     /* ====================================================
-     *  v1.0.32: Глобальный listener изменения качества в плеере.
-     *  Lampa.Player.listener.follow('quality', e) — срабатывает именно при выборе
-     *  качества пользователем в меню «Качество» плеера. e = {name, url}, e.name —
-     *  ярлык типа '1080p Ultra'/'720p'/'auto'.
-     *  Пишем в rezka_quality_<filmId> (и в rezka_quality как глобальный фолбэк).
+     *  v1.0.33: Глобальный listener изменения качества в плеере.
+     *  ВАЖНО: событие 'quality' шлётся не в Lampa.Player.listener,
+     *  а в Lampa.PlayerPanel.listener (это панель с кнопками «Качество»/«Дорожки»).
+     *  Lampa.Player.listener знает только: create/ready/start/destroy/external.
+     *  Поэтому подписываемся на ОБА источника.
+     *  e = {name, url}, e.name — ярлык типа '1080p Ultra'/'720p'/'auto'.
      * ==================================================== */
     function registerGlobalQualityListener() {
         if (window._rezkaQualityListenerRegistered) return;
         try {
-            if (!Lampa.Player || !Lampa.Player.listener || !Lampa.Player.listener.follow) {
-                console.log('REZKA', 'Player.listener unavailable — quality save disabled');
-                return;
+            // 1) Активность плеера — Lampa.Player.listener (start/destroy)
+            if (Lampa.Player && Lampa.Player.listener && Lampa.Player.listener.follow) {
+                Lampa.Player.listener.follow('start', function () {
+                    window._rezkaPlayerActive = true;
+                    console.log('REZKA', 'player active = true, filmId=' + (window._rezkaCurrentFilmId || ''));
+                });
+                Lampa.Player.listener.follow('destroy', function () {
+                    window._rezkaPlayerActive = false;
+                    console.log('REZKA', 'player active = false');
+                });
+            } else {
+                console.log('REZKA', 'Player.listener unavailable');
             }
-            Lampa.Player.listener.follow('start', function () {
-                window._rezkaPlayerActive = true;
-                console.log('REZKA', 'player active = true, filmId=' + (window._rezkaCurrentFilmId || ''));
-            });
-            Lampa.Player.listener.follow('destroy', function () {
-                window._rezkaPlayerActive = false;
-                console.log('REZKA', 'player active = false');
-            });
 
-            Lampa.Player.listener.follow('quality', function (e) {
+            var qualityHandler = function (e) {
                 try {
                     if (!e || !e.name) return;
-                    if (window._rezkaSelfWritingVQD) {
-                        // Наш собственный trigger (при applyQualityToPlayer) — игнорируем.
-                        return;
-                    }
+                    if (window._rezkaSelfWritingVQD) return; // игнорируем свои же записи
                     var label = String(e.name);
                     var fid = window._rezkaCurrentFilmId;
-                    // Пишем per-film и глобальный дефолт.
                     if (fid) {
                         try { Lampa.Storage.set('rezka_quality_' + fid, label); } catch (er) {}
                     }
                     try { Lampa.Storage.set('rezka_quality', label); } catch (er) {}
-                    console.log('REZKA', 'Player.quality event: saved label="' + label + '" filmId=' + (fid || '-') + ' url=' + (e.url || '').slice(-40));
+                    console.log('REZKA', 'quality event saved: "' + label + '" filmId=' + (fid || '-') + ' url=' + String(e.url || '').slice(-40));
                 } catch (er) {
-                    console.log('REZKA', 'quality listener error', er && er.message);
+                    console.log('REZKA', 'quality handler error', er && er.message);
                 }
-            });
+            };
 
+            // 2) ОСНОВНОЙ источник 'quality' — Lampa.PlayerPanel.listener
+            var bound = false;
+            if (Lampa.PlayerPanel && Lampa.PlayerPanel.listener && Lampa.PlayerPanel.listener.follow) {
+                Lampa.PlayerPanel.listener.follow('quality', qualityHandler);
+                bound = true;
+                console.log('REZKA', 'v1.0.33 PlayerPanel.quality listener registered');
+            }
+
+            // 3) Дополнительно пытаемся и на Lampa.Player.listener — на случай форков, где quality прокидывают в Player.
+            try {
+                if (Lampa.Player && Lampa.Player.listener && Lampa.Player.listener.follow) {
+                    Lampa.Player.listener.follow('quality', qualityHandler);
+                }
+            } catch (e2) {}
+
+            if (!bound) {
+                console.log('REZKA', 'WARNING: PlayerPanel.listener unavailable — quality save may not work');
+            }
             window._rezkaQualityListenerRegistered = true;
-            console.log('REZKA', 'v1.0.32 global Player.quality listener registered');
         } catch (e) {
             console.log('REZKA', 'registerGlobalQualityListener error', e && e.message);
         }
