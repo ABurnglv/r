@@ -21,7 +21,7 @@
      * ==================================================== */
     var manifest = {
         type: 'video',
-        version: '1.0.47',
+        version: '1.0.48',
         name: 'HDREZKA',
         description: 'Просмотр фильмов и сериалов с HDREZKA по личному аккаунту',
         component: 'rezka_online'
@@ -1109,6 +1109,12 @@
 
         var self = this;
 
+        // v1.0.46/47/48: сохранённый фокус перед переходом в фильтр.
+        // savedFocusIdx — порядковый номер фокусируемого .selector в scroll.
+        // Объявляем ОДИНРАЗ в конструкторе компонента, иначе self.start() регулярно
+        // сбрасывал бы его в -1 и при filter.onBack восстановление не работало бы.
+        self._savedFocusIdx = -1;
+
         this.start = function () {
             if (Lampa.Activity.active().activity !== this.activity) return;
             try {
@@ -1118,10 +1124,6 @@
                     Lampa.Background.immediately(object.movie.background_image || object.movie.img);
                 }
             } catch (e) { /* ignore background errors */ }
-            // v1.0.46/47: сохранённый фокус перед переходом в фильтр.
-            // savedFocusIdx — порядковый номер фокусируемого .selector в scroll;
-            // выживает после buildList() (в отличие от самого DOM-узла).
-            self._savedFocusIdx = -1;
             Lampa.Controller.add('content', {
                 toggle: function () {
                     Lampa.Controller.collectionSet(scroll.render(), files.render());
