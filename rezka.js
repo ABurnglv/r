@@ -21,7 +21,7 @@
      * ==================================================== */
     var manifest = {
         type: 'video',
-        version: '1.0.23',
+        version: '1.0.24',
         name: 'HDREZKA',
         description: 'Просмотр фильмов и сериалов с HDREZKA по личному аккаунту',
         component: 'rezka_online'
@@ -745,16 +745,14 @@
                 });
                 // Lampa.Player выбирает уровень через parseInt(ключ) == Storage.video_quality_default.
                 // На rezka бывают ключи '4K' (parseInt=4) и '2K' (parseInt=2) — они никогда не
-                // совпадут с 1080/2160. Также '1080p' и '1080p Ultra' оба дают parseInt=1080 —
-                // Lampa не может отличить их и всегда даёт первый 1080. Решение: мапим
-                // "1080p Ultra" в "1440p" — это свободная ступень на rezka, и в Lampa это
-                // отдельный уровень (1440), который Lampa легко переключает. Пользователь
-                // видит "1440p Ultra" в меню плеера и может различить от обычного 1080p.
+                // совпадут с 1080/2160. Нормализуем имя: '4K' → '2160p', '2K' → '1440p'.
+                // '1080p Ultra' оставляем как есть — переключение между 1080p и 1080p Ultra в
+                // фильтре плагина не работает (оба parseInt=1080), но в меню плеера они видны
+                // как разные пункты и пользователь может выбрать нужный.
                 function normalizeQualityLabel(label) {
                     var s = String(label || '').trim();
                     if (/^4K\b/i.test(s)) return s.replace(/^4K\b/i, '2160p');
                     if (/^2K\b/i.test(s)) return s.replace(/^2K\b/i, '1440p');
-                    if (/^1080p\s+Ultra\b/i.test(s)) return '1440p Ultra';
                     return s;
                 }
                 sortedItems.forEach(function (it) { qualities[normalizeQualityLabel(it.label)] = it.file; });
@@ -1081,7 +1079,7 @@
                         var sNum = parseInt(ep.season_id || season.id, 10) || 0;
                         var eNum = parseInt(ep.episode_id || ep.name, 10) || 0;
                         // Предпочитаем имя эпизода из TMDB (ep.tmdb_name), иначе — "Серия N"
-                        var epLabel = ep.tmdb_name ? ('Серия ' + eNum + '. ' + ep.tmdb_name) : (ep.name || ('Серия ' + (i + 1)));
+                        var epLabel = ep.tmdb_name || ep.name || ('Серия ' + (i + 1));
                         var cell = {
                             title: movieTitle + ' — ' + epLabel,
                             season: sNum,
@@ -1280,7 +1278,7 @@
                                 rc.ep.tmdb_name = nm; // сохраним в ep — playSeries возьмёт оттуда
                                 try {
                                     var titleEl = rc.card.find('.rezka-prestige__title, .online__title').first();
-                                    if (titleEl.length) titleEl.text('Серия ' + rc.eNum + '. ' + nm);
+                                    if (titleEl.length) titleEl.text(nm);
                                 } catch (e) {}
                             }
                         });
@@ -1449,10 +1447,15 @@
                     'Referer': getDomain() + '/'
                 }
             }, function (resp) {
+                var rawHead = '';
+                try { rawHead = (typeof resp === 'string' ? resp : JSON.stringify(resp)).slice(0, 300); } catch (e0) {}
+                console.log('REZKA', 'reloadEpisodesForVoice raw:', rawHead);
                 try {
                     var json = typeof resp === 'string' ? JSON.parse(resp) : resp;
                     if (!json || !json.success) {
-                        console.log('REZKA', 'reloadEpisodesForVoice fail:', json && json.message);
+                        var srvMsg = (json && (json.message || json.error)) || 'неизвестная ошибка';
+                        console.log('REZKA', 'reloadEpisodesForVoice fail:', srvMsg, 'tid=' + voice.id, 'fid=' + info.film_id);
+                        try { Lampa.Noty.show('HDREZKA: смена озвучки — ' + srvMsg + ' [tid=' + voice.id + ' fid=' + info.film_id + ']'); } catch (e1) {}
                         // Оставим исходные seasons/episodes — пусть пользователь видит бывшие.
                         done && done();
                         return;
@@ -1483,11 +1486,14 @@
                     // Сбросим выбранный сезон на первый из новых.
                     state.choice.season = 0;
                 } catch (e) {
-                    console.log('REZKA', 'reloadEpisodesForVoice parse error:', e && e.message);
+                    console.log('REZKA', 'reloadEpisodesForVoice parse error:', e && e.message, 'raw=', rawHead);
+                    try { Lampa.Noty.show('HDREZKA: ошибка парсинга ответа смены озвучки — ' + (e && e.message)); } catch (e2) {}
                 }
                 done && done();
             }, function (xhr, msg) {
-                console.log('REZKA', 'reloadEpisodesForVoice network fail:', msg);
+                var st = (xhr && (xhr.status || xhr.statusCode)) || '?';
+                console.log('REZKA', 'reloadEpisodesForVoice network fail:', msg, 'status=', st);
+                try { Lampa.Noty.show('HDREZKA: сеть упала при смене озвучки [status=' + st + '] ' + (msg || '')); } catch (e3) {}
                 done && done();
             });
         }
