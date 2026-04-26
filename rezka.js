@@ -21,7 +21,7 @@
      * ==================================================== */
     var manifest = {
         type: 'video',
-        version: '1.0.33',
+        version: '1.0.34',
         name: 'HDREZKA',
         description: 'Просмотр фильмов и сериалов с HDREZKA по личному аккаунту',
         component: 'rezka_online'
@@ -1705,10 +1705,22 @@
             return 0;
         }
 
-        // Подписываемся на обновление списка доступных качеств (после первого getStream)
+        // Подписываемся на:
+        //  - 'available'  — пришёл фактический список качеств после первого getStream;
+        //  - 'changed'    — v1.0.34: пользователь выбрал качество в плеере → обновляем отображение.
         var qualityListener = function (e) {
-            if (e && e.type === 'available') {
+            if (!e) return;
+            if (e.type === 'available') {
                 try { buildFilter(); } catch (er) {}
+            } else if (e.type === 'changed') {
+                // Обновляем только если это событие о текущем фильме.
+                try {
+                    var myId = curFilmId();
+                    if (!e.filmId || String(e.filmId) === String(myId)) {
+                        buildFilter();
+                        buildList();
+                    }
+                } catch (er) {}
             }
         };
         try { Lampa.Listener.follow('rezka_quality', qualityListener); } catch (e) {}
@@ -2297,6 +2309,10 @@
                     }
                     try { Lampa.Storage.set('rezka_quality', label); } catch (er) {}
                     console.log('REZKA', 'quality event saved: "' + label + '" filmId=' + (fid || '-') + ' url=' + String(e.url || '').slice(-40));
+                    // v1.0.34: уведомляем компонент — пусть перерисует фильтр «Качество» сразу.
+                    try {
+                        Lampa.Listener.send('rezka_quality', { type: 'changed', label: label, filmId: fid });
+                    } catch (er) {}
                 } catch (er) {
                     console.log('REZKA', 'quality handler error', er && er.message);
                 }
