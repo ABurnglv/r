@@ -21,7 +21,7 @@
      * ==================================================== */
     var manifest = {
         type: 'video',
-        version: '1.0.31',
+        version: '1.0.32',
         name: 'HDREZKA',
         description: 'Просмотр фильмов и сериалов с HDREZKA по личному аккаунту',
         component: 'rezka_online'
@@ -37,8 +37,43 @@
         cookie:   'rezka_cookie',     // dle_user_id=...; dle_password=...
         status:   'rezka_status',     // 'logged' | 'guest' | 'error:<msg>'
         proxy:    'rezka_proxy_url',  // optional CORS proxy
-        quality:  'rezka_quality'     // выбранное качество: 'auto'|'2160p'|'1080p Ultra'|'1080p'|'720p'|'480p'|'360p'
+        quality:  'rezka_quality'     // выбранное качество (глобальный фолбэк): 'auto'|'2160p'|'1080p Ultra'|'1080p'|'720p'|'480p'|'360p'
     };
+
+    /* v1.0.32: per-film хранилище качества и сезона.
+       filmId — это object.movie.id (TMDB id), стабильный per movie. */
+    function qualityKeyFor(filmId) {
+        return filmId ? ('rezka_quality_' + filmId) : STORAGE.quality;
+    }
+    function seasonKeyFor(filmId) {
+        return filmId ? ('rezka_season_' + filmId) : '';
+    }
+    function getQualityFor(filmId) {
+        try {
+            // 1) пробуем per-film, 2) фолбэк на глобальный rezka_quality, 3) 'auto'
+            var perFilm = filmId ? Lampa.Storage.get('rezka_quality_' + filmId, '__none__') : '__none__';
+            if (perFilm !== '__none__' && perFilm !== null && perFilm !== undefined && perFilm !== '') return perFilm;
+            return Lampa.Storage.get(STORAGE.quality, 'auto');
+        } catch (e) { return 'auto'; }
+    }
+    function setQualityFor(filmId, value) {
+        try {
+            if (filmId) Lampa.Storage.set('rezka_quality_' + filmId, value);
+            // Также пишем в глобальный — чтобы это значение было дефолтом для следующих новых фильмов.
+            Lampa.Storage.set(STORAGE.quality, value);
+        } catch (e) {}
+    }
+    function getSavedSeason(filmId) {
+        try {
+            if (!filmId) return '';
+            return Lampa.Storage.get('rezka_season_' + filmId, '');
+        } catch (e) { return ''; }
+    }
+    function setSavedSeason(filmId, seasonId) {
+        try {
+            if (filmId && seasonId) Lampa.Storage.set('rezka_season_' + filmId, String(seasonId));
+        } catch (e) {}
+    }
 
     /* Безопасный вызов Lampa.Storage.add — в разных билдах Lampa
        сигнатура разная. Используем get(name, default) — это работает везде.
@@ -755,7 +790,7 @@
                 var items = parsePlaylist(decoded);
                 if (!items.length) { err && err('Пустой плейлист'); return; }
                 var qualities = {};
-                var qPrefForSort = (function () { try { return Lampa.Storage.get(STORAGE.quality, 'auto'); } catch (e) { return 'auto'; } })();
+                var qPrefForSort = getQualityFor(window._rezkaCurrentFilmId);
                 // Сортируем от лучшего к худшему для корректного Player.getUrlQuality fallback.
                 // При равном parseInt (напр. 1080p и 1080p Ultra) — ставим выбранное пользователем вариант ПЕРВЫМ,
                 // чтобы Lampa.Player.getUrlQuality (`for(var q in quality)`) выбрал именно его.
@@ -794,7 +829,7 @@
                 // Плейлист от hdrezka.fi отдаёт качества от худшего (360p) к лучшему (4K) в items[],
                 // выбираем файл по пользовательскому предпочтению (Storage rezka_quality).
                 // fallback: берём ближайшее по высоте качество — или лучшее (последний элемент items).
-                var qPref = Lampa.Storage.get(STORAGE.quality, 'auto');
+                var qPref = getQualityFor(window._rezkaCurrentFilmId);
                 var picked = items[items.length - 1]; // по умолчанию — лучшее
                 if (qPref && qPref !== 'auto') {
                     var prefHeight = parseInt(qPref, 10) || 0;
@@ -994,7 +1029,8 @@
         // Применяем выбор качества к данным, которые идут в Lampa.Player. Глобальный listener (вне компонента)
         // регистрируется при запуске плагина — см. registerGlobalQualityListener() ниже.
         function applyQualityToPlayer() {
-            var qPref = Lampa.Storage.get(STORAGE.quality, 'auto');
+            // v1.0.32: берём per-film, фолбэк на глобальный
+            var qPref = getQualityFor(curFilmId());
             // Поднимаем флаг «это мы сами пишем», чтобы global listener игнорировал это событие.
             window._rezkaSelfWritingVQD = true;
             try {
@@ -1025,6 +1061,8 @@
                 Lampa.Noty.show('HDREZKA: нет озвучек');
                 return;
             }
+            // v1.0.32: запоминаем filmId — global quality listener будет писать per-film.
+            try { window._rezkaCurrentFilmId = curFilmId(); } catch (e) {}
             defIdx = (typeof defIdx === 'number' && defIdx >= 0) ? defIdx : 0;
             if (defIdx >= info.voice.length) defIdx = 0;
             var movieTitle = (object.movie.title || object.movie.name || '');
@@ -1098,6 +1136,8 @@
         // ====================================================================
         function playSeries(info, voice, season, items, epIdx) {
             if (!items || !items.length) { Lampa.Noty.show('HDREZKA: нет серий'); return; }
+            // v1.0.32: запоминаем filmId — для global quality listener.
+            try { window._rezkaCurrentFilmId = curFilmId(); } catch (e) {}
             epIdx = (typeof epIdx === 'number' && epIdx >= 0 && epIdx < items.length) ? epIdx : 0;
             var movieTitle = (object.movie.title || object.movie.name || '');
             var origTitle = (object.movie.original_name || object.movie.original_title || movieTitle || '');
@@ -1446,8 +1486,12 @@
         // Используем этот список и в sort-меню вверху, и для выбора по умолчанию в getStream.
         var QUALITY_ORDER = ['2160p Ultra', '2160p', '1440p', '1080p Ultra', '1080p', '720p', '480p', '360p'];
 
-        function getQualityPref() { return Lampa.Storage.get(STORAGE.quality, 'auto'); }
-        function setQualityPref(q) { Lampa.Storage.set(STORAGE.quality, q); }
+        // v1.0.32: качество хранится per-film. filmId — object.movie.id.
+        function curFilmId() {
+            try { return (object.movie && (object.movie.id || object.movie.tmdb_id)) || ''; } catch (e) { return ''; }
+        }
+        function getQualityPref() { return getQualityFor(curFilmId()); }
+        function setQualityPref(q) { setQualityFor(curFilmId(), q); }
 
         function buildFilter() {
             if (!state.info) return;
@@ -1534,6 +1578,14 @@
                     }
                 } else if (a.stype === 'season' && b && typeof b.index !== 'undefined') {
                     state.choice.season = b.index;
+                    // v1.0.32: запоминаем выбранный сезон per-film.
+                    try {
+                        var sObj = info.season[b.index];
+                        if (sObj && sObj.id) {
+                            setSavedSeason(curFilmId(), sObj.id);
+                            console.log('REZKA', 'saved season id=' + sObj.id + ' for filmId=' + curFilmId());
+                        }
+                    } catch (e) {}
                 }
                 setTimeout(Lampa.Select.close, 10);
                 buildFilter();
@@ -1684,9 +1736,21 @@
             var onFilmInfo = function (info) {
                     state.info = info;
                     state.choice.voice = pickDefaultVoiceIdx(info.voice);
-                    // Для сериала — выбираем последний сезон по умолчанию
+                    // Для сериала — v1.0.32: пытаемся восстановить сохранённый сезон (rezka_season_<filmId>),
+                    // иначе — последний сезон.
                     if (info.is_series && info.season.length) {
-                        state.choice.season = info.season.length - 1;
+                        var defaultSeasonIdx = info.season.length - 1;
+                        var savedSeasonId = getSavedSeason(curFilmId());
+                        if (savedSeasonId) {
+                            for (var ssi = 0; ssi < info.season.length; ssi++) {
+                                if (String(info.season[ssi].id) === String(savedSeasonId)) {
+                                    defaultSeasonIdx = ssi;
+                                    console.log('REZKA', 'restored saved season idx=' + ssi + ' id=' + savedSeasonId + ' for filmId=' + curFilmId());
+                                    break;
+                                }
+                            }
+                        }
+                        state.choice.season = defaultSeasonIdx;
                         // Предзагружаем TMDB-имена/постеры всех сезонов в фоне
                         // — при переключении сезона карточки сразу покажут имена без мелькания "Серия N".
                         if (object.movie && object.movie.id) {
@@ -2198,63 +2262,50 @@
     }
 
     /* ====================================================
-     *  Глобальный listener изменения качества в плеере.
-     *  Срабатывает при любом изменении video_quality_default, в т. ч. из меню
-     *  «Качество» внутри Lampa.Player. Наши собственные записи из applyQualityToPlayer
-     *  помечаем флагом window._rezkaSelfWritingVQD и игнорируем.
-     *  Кроме того — пишем в rezka_quality ТОЛЬКО когда плеер активен (window._rezkaPlayerActive)
-     *  — иначе любые изменения Lampa в Настройках перетирали бы наш выбор.
+     *  v1.0.32: Глобальный listener изменения качества в плеере.
+     *  Lampa.Player.listener.follow('quality', e) — срабатывает именно при выборе
+     *  качества пользователем в меню «Качество» плеера. e = {name, url}, e.name —
+     *  ярлык типа '1080p Ultra'/'720p'/'auto'.
+     *  Пишем в rezka_quality_<filmId> (и в rezka_quality как глобальный фолбэк).
      * ==================================================== */
     function registerGlobalQualityListener() {
         if (window._rezkaQualityListenerRegistered) return;
         try {
-            if (!Lampa.Storage.listener || !Lampa.Storage.listener.follow) {
-                console.log('REZKA', 'Storage.listener unavailable — quality save disabled');
+            if (!Lampa.Player || !Lampa.Player.listener || !Lampa.Player.listener.follow) {
+                console.log('REZKA', 'Player.listener unavailable — quality save disabled');
                 return;
             }
-            // Отслеживаем, открыт ли плеер — listener пишет rezka_quality ТОЛЬКО пока плеер активен.
-            try {
-                if (Lampa.Player && Lampa.Player.listener && Lampa.Player.listener.follow) {
-                    Lampa.Player.listener.follow('start', function () {
-                        window._rezkaPlayerActive = true;
-                        console.log('REZKA', 'player active = true');
-                    });
-                    Lampa.Player.listener.follow('destroy', function () {
-                        window._rezkaPlayerActive = false;
-                        console.log('REZKA', 'player active = false');
-                    });
-                }
-            } catch (e2) { console.log('REZKA', 'Player.listener follow error', e2 && e2.message); }
-
-            Lampa.Storage.listener.follow('change', function (e) {
-                if (!e || e.name !== 'video_quality_default') return;
-                if (window._rezkaSelfWritingVQD) {
-                    // Это наш же set в applyQualityToPlayer — игнорируем
-                    return;
-                }
-                if (!window._rezkaPlayerActive) {
-                    // Плеер не активен — это изменение из глобальных Настроек, не наше дело
-                    return;
-                }
-                var v = e.value;
-                var n = parseInt(v, 10);
-                if (!n || isNaN(n)) return;
-                var label;
-                if (n >= 4096) {
-                    label = 'auto';
-                } else {
-                    var avail = (Lampa.Storage.get('rezka_quality_available', '') || '').split(',').map(function(x){return x.trim();}).filter(Boolean);
-                    var match = '';
-                    for (var i = 0; i < avail.length; i++) {
-                        if (parseInt(avail[i], 10) === n) { match = avail[i]; break; }
-                    }
-                    label = match || (n + 'p');
-                }
-                try { Lampa.Storage.set('rezka_quality', label); } catch (er) {}
-                console.log('REZKA', 'global quality listener: saved rezka_quality=' + label + ' (player VQD=' + v + ')');
+            Lampa.Player.listener.follow('start', function () {
+                window._rezkaPlayerActive = true;
+                console.log('REZKA', 'player active = true, filmId=' + (window._rezkaCurrentFilmId || ''));
             });
+            Lampa.Player.listener.follow('destroy', function () {
+                window._rezkaPlayerActive = false;
+                console.log('REZKA', 'player active = false');
+            });
+
+            Lampa.Player.listener.follow('quality', function (e) {
+                try {
+                    if (!e || !e.name) return;
+                    if (window._rezkaSelfWritingVQD) {
+                        // Наш собственный trigger (при applyQualityToPlayer) — игнорируем.
+                        return;
+                    }
+                    var label = String(e.name);
+                    var fid = window._rezkaCurrentFilmId;
+                    // Пишем per-film и глобальный дефолт.
+                    if (fid) {
+                        try { Lampa.Storage.set('rezka_quality_' + fid, label); } catch (er) {}
+                    }
+                    try { Lampa.Storage.set('rezka_quality', label); } catch (er) {}
+                    console.log('REZKA', 'Player.quality event: saved label="' + label + '" filmId=' + (fid || '-') + ' url=' + (e.url || '').slice(-40));
+                } catch (er) {
+                    console.log('REZKA', 'quality listener error', er && er.message);
+                }
+            });
+
             window._rezkaQualityListenerRegistered = true;
-            console.log('REZKA', 'global quality listener registered');
+            console.log('REZKA', 'v1.0.32 global Player.quality listener registered');
         } catch (e) {
             console.log('REZKA', 'registerGlobalQualityListener error', e && e.message);
         }
