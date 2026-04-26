@@ -21,7 +21,7 @@
      * ==================================================== */
     var manifest = {
         type: 'video',
-        version: '1.0.49',
+        version: '1.0.50',
         name: 'HDREZKA',
         description: 'Просмотр фильмов и сериалов с HDREZKA по личному аккаунту',
         component: 'rezka_online'
@@ -674,6 +674,23 @@
                 episode: [], // [{name, season_id, episode_id}]
                 page_url: filmUrl
             };
+
+            // v1.0.50: раньше проверяем — фильм объявлен, но ещё не вышел?
+            // На странице будет дата премьеры и баннер «Скоро на сайте»,
+            // но НЕ будет initCDNMoviesEvents/initCDNSeriesEvents.
+            var hasPlayer = /initCDN(?:Series|Movies)Events\s*\(/.test(str);
+            if (!hasPlayer) {
+                var isAnnounce = /b-post__infolink_announce|skoro-na-sajte|Скоро на сайте|trailer-only|Ожидается/i.test(str);
+                var premM = str.match(/Премьера[^<]*<\/h2>[\s\S]{0,300}?<td[^>]*>([\s\S]{0,200}?)<\/td>/i);
+                var premMRu = str.match(/Дата выхода[^<]*<\/h2>[\s\S]{0,300}?<td[^>]*>([\s\S]{0,200}?)<\/td>/i);
+                var premiere = '';
+                if (premM) premiere = premM[1].replace(/<[^>]+>/g, ' ').replace(/\s+/g, ' ').trim();
+                else if (premMRu) premiere = premMRu[1].replace(/<[^>]+>/g, ' ').replace(/\s+/g, ' ').trim();
+                console.log('REZKA', 'no player on page (фильм не вышел?) — announce=' + isAnnounce + ', premiere=', premiere || '(нет)');
+                info._notReleased = true;
+                info._premiereInfo = premiere;
+                info._isAnnounce = isAnnounce;
+            }
 
             // film id. Сигнатура rezka:
             //   initCDNMoviesEvents(film_id, translator_id, is_camrip[0|1], is_ads[0|1], is_director[0|1])
@@ -2166,6 +2183,15 @@
                         }
                     }
                     self.activity.loader(false);
+                    // v1.0.50: фильм/сериал на HDREZKA есть, но плеер не подключён — всегда анонс.
+                    if (info._notReleased) {
+                        var msg = 'Фильм ещё не вышел на HDREZKA';
+                        if (info._premiereInfo) msg += '. Премьера: ' + info._premiereInfo;
+                        else if (info._isAnnounce) msg += ' (анонс)';
+                        showError(msg);
+                        self.activity.toggle();
+                        return;
+                    }
                     // ФИЛЬМ (не сериал): пользователь нажал «HDREZKA» и ожидает немедленного воспроизведения.
                     // Карточка-промежуток была бы лишним кликом — сразу запускаем плеер и выкатываемся назад.
                     if (!info.is_series) {
