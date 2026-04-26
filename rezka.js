@@ -21,7 +21,7 @@
      * ==================================================== */
     var manifest = {
         type: 'video',
-        version: '1.0.28',
+        version: '1.0.29',
         name: 'HDREZKA',
         description: 'Просмотр фильмов и сериалов с HDREZKA по личному аккаунту',
         component: 'rezka_online'
@@ -991,55 +991,28 @@
         // переписывает data.url = getUrlQuality(data.quality) — выбирая ключ где
         // parseInt(ключ) == Storage.field('video_quality_default') (строка '480'/'720'/'1080'/'1440'/'2160').
         // Ставим этот storage временно перед play(), потом восстанавливаем.
-        // Подписка на изменение video_quality_default в плеере — сохраняем выбор пользователя.
-        // Регистрируется один раз на компонент.
-        var _vqdListenerRegistered = false;
-        function registerQualityListener() {
-            if (_vqdListenerRegistered) return;
-            try {
-                if (!Lampa.Storage.listener || !Lampa.Storage.listener.follow) return;
-                Lampa.Storage.listener.follow('change', function (e) {
-                    if (!e || e.name !== 'video_quality_default') return;
-                    var v = e.value;
-                    var n = parseInt(v, 10);
-                    if (!n || isNaN(n)) return;
-                    // 4096 / огромное число → авто
-                    if (n >= 4096) {
-                        setQualityPref('auto');
-                        console.log('REZKA', 'quality listener: set rezka_quality=auto from VQD=' + v);
-                        return;
-                    }
-                    // Подбираем лучший лейбл из rezka_quality_available — там может быть '1080p Ultra'/'1080p'
-                    var avail = (Lampa.Storage.get('rezka_quality_available', '') || '').split(',').map(function(x){return x.trim();}).filter(Boolean);
-                    var match = '';
-                    for (var i = 0; i < avail.length; i++) {
-                        if (parseInt(avail[i], 10) === n) { match = avail[i]; break; }
-                    }
-                    var label = match || (n + 'p');
-                    setQualityPref(label);
-                    console.log('REZKA', 'quality listener: set rezka_quality=' + label + ' from VQD=' + v);
-                });
-                _vqdListenerRegistered = true;
-            } catch (e) {
-                console.log('REZKA', 'registerQualityListener error', e);
-            }
-        }
-
+        // Применяем выбор качества к данным, которые идут в Lampa.Player. Глобальный listener (вне компонента)
+        // регистрируется при запуске плагина — см. registerGlobalQualityListener() ниже.
         function applyQualityToPlayer() {
-            registerQualityListener();
             var qPref = Lampa.Storage.get(STORAGE.quality, 'auto');
-            if (qPref && qPref !== 'auto') {
-                var n = parseInt(qPref, 10) || 0;
-                if (n) {
-                    try { Lampa.Storage.set('video_quality_default', String(n)); } catch (e) {}
-                    console.log('REZKA', 'applyQualityToPlayer set video_quality_default=', String(n), 'pref=', qPref);
+            // Поднимаем флаг «это мы сами пишем», чтобы global listener игнорировал это событие.
+            window._rezkaSelfWritingVQD = true;
+            try {
+                if (qPref && qPref !== 'auto') {
+                    var n = parseInt(qPref, 10) || 0;
+                    if (n) {
+                        try { Lampa.Storage.set('video_quality_default', String(n)); } catch (e) {}
+                        console.log('REZKA', 'applyQualityToPlayer set video_quality_default=', String(n), 'pref=', qPref);
+                    }
+                } else {
+                    // «Максимальное» — попробуем 4096, и Lampa поищет лучший фолбэк через set_better
+                    try { Lampa.Storage.set('video_quality_default', '4096'); } catch (e) {}
+                    console.log('REZKA', 'applyQualityToPlayer set video_quality_default=4096 (auto)');
                 }
-            } else {
-                // «Максимальное» — попробуем 4096, и Lampa поищет лучший фолбэк через set_better
-                try { Lampa.Storage.set('video_quality_default', '4096'); } catch (e) {}
-                console.log('REZKA', 'applyQualityToPlayer set video_quality_default=4096 (auto)');
+            } finally {
+                // Снимаем флаг синхронно — listener вызывается внутри Storage.set() синхронно.
+                window._rezkaSelfWritingVQD = false;
             }
-            // SAVED_VQD restore удалён в v1.0.28 — он перетирал выбор пользователя в плеере.
         }
 
         // ====================================================================
@@ -2170,6 +2143,69 @@
         }
     }
 
+    /* ====================================================
+     *  Глобальный listener изменения качества в плеере.
+     *  Срабатывает при любом изменении video_quality_default, в т. ч. из меню
+     *  «Качество» внутри Lampa.Player. Наши собственные записи из applyQualityToPlayer
+     *  помечаем флагом window._rezkaSelfWritingVQD и игнорируем.
+     *  Кроме того — пишем в rezka_quality ТОЛЬКО когда плеер активен (window._rezkaPlayerActive)
+     *  — иначе любые изменения Lampa в Настройках перетирали бы наш выбор.
+     * ==================================================== */
+    function registerGlobalQualityListener() {
+        if (window._rezkaQualityListenerRegistered) return;
+        try {
+            if (!Lampa.Storage.listener || !Lampa.Storage.listener.follow) {
+                console.log('REZKA', 'Storage.listener unavailable — quality save disabled');
+                return;
+            }
+            // Отслеживаем, открыт ли плеер — listener пишет rezka_quality ТОЛЬКО пока плеер активен.
+            try {
+                if (Lampa.Player && Lampa.Player.listener && Lampa.Player.listener.follow) {
+                    Lampa.Player.listener.follow('start', function () {
+                        window._rezkaPlayerActive = true;
+                        console.log('REZKA', 'player active = true');
+                    });
+                    Lampa.Player.listener.follow('destroy', function () {
+                        window._rezkaPlayerActive = false;
+                        console.log('REZKA', 'player active = false');
+                    });
+                }
+            } catch (e2) { console.log('REZKA', 'Player.listener follow error', e2 && e2.message); }
+
+            Lampa.Storage.listener.follow('change', function (e) {
+                if (!e || e.name !== 'video_quality_default') return;
+                if (window._rezkaSelfWritingVQD) {
+                    // Это наш же set в applyQualityToPlayer — игнорируем
+                    return;
+                }
+                if (!window._rezkaPlayerActive) {
+                    // Плеер не активен — это изменение из глобальных Настроек, не наше дело
+                    return;
+                }
+                var v = e.value;
+                var n = parseInt(v, 10);
+                if (!n || isNaN(n)) return;
+                var label;
+                if (n >= 4096) {
+                    label = 'auto';
+                } else {
+                    var avail = (Lampa.Storage.get('rezka_quality_available', '') || '').split(',').map(function(x){return x.trim();}).filter(Boolean);
+                    var match = '';
+                    for (var i = 0; i < avail.length; i++) {
+                        if (parseInt(avail[i], 10) === n) { match = avail[i]; break; }
+                    }
+                    label = match || (n + 'p');
+                }
+                try { Lampa.Storage.set('rezka_quality', label); } catch (er) {}
+                console.log('REZKA', 'global quality listener: saved rezka_quality=' + label + ' (player VQD=' + v + ')');
+            });
+            window._rezkaQualityListenerRegistered = true;
+            console.log('REZKA', 'global quality listener registered');
+        } catch (e) {
+            console.log('REZKA', 'registerGlobalQualityListener error', e && e.message);
+        }
+    }
+
     function startPlugin() {
         if (window.rezka_plugin_started) return;
         window.rezka_plugin_started = true;
@@ -2181,6 +2217,7 @@
             addSettings();
             addOnlineSource();
             addCardButton();
+            registerGlobalQualityListener();
             console.log('REZKA', 'plugin started OK');
         } catch (err) {
             console.log('REZKA', 'startPlugin error:', err && (err.stack || err.message));
