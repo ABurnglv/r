@@ -21,7 +21,7 @@
      * ==================================================== */
     var manifest = {
         type: 'video',
-        version: '1.0.51',
+        version: '1.0.52',
         name: 'HDREZKA',
         description: 'Просмотр фильмов и сериалов с HDREZKA по личному аккаунту',
         component: 'rezka_online'
@@ -1317,6 +1317,10 @@
                     // тот же паттерн, что в встроенном Lampa Online.
                     if (info.voice.length > 1) {
                         try {
+                            // v1.0.52: текущий индекс озвучки в плеере хранится в замыкании (надёжнее, чем по voice_name).
+                            var _curVoiceIdx = defIdx;
+                            // Замок против повторных кликов и наложения потоков.
+                            var _switching = false;
                             var voiceovers = info.voice.map(function (v, vi) {
                                 return {
                                     label: v.name,
@@ -1326,15 +1330,24 @@
                                     selected: vi === defIdx,
                                     enabled:  vi === defIdx,
                                     onSelect: function (chosen) {
-                                        // Если выбрана та же дорожка, что и сейчас играет — ничего не делаем.
-                                        // Ищем текущую в item.voiceovers (её selected=true, но до этого она была сброшена Select.show выше).
-                                        // Проще — сравниваем индекс с текущим voice_name из pleiера.
-                                        try {
-                                            var pd = Lampa.Player.playdata && Lampa.Player.playdata();
-                                            if (pd && pd.voice_name && pd.voice_name === v.name) return;
-                                        } catch (eVc) {}
-                                        console.log('REZKA', 'film voice change in player ->', v.name);
+                                        // Уже идёт переключение — игнор.
+                                        if (_switching) {
+                                            console.log('REZKA', 'voice switch ignored: already in progress');
+                                            return;
+                                        }
+                                        // Та же дорожка — ничего не делаем.
+                                        if (vi === _curVoiceIdx) {
+                                            console.log('REZKA', 'voice switch ignored: same voice idx=' + vi);
+                                            return;
+                                        }
+                                        _switching = true;
+                                        console.log('REZKA', 'film voice change in player: idx ' + _curVoiceIdx + ' -> ' + vi + ' (' + v.name + ')');
                                         Lampa.Noty.show('HDREZKA: переключаю на «' + v.name + '»…');
+                                        // Сразу глушим звук старого потока (на случай, если новый запустится с задержкой).
+                                        try {
+                                            var $vid = $('video');
+                                            if ($vid && $vid.length) { try { $vid[0].pause(); } catch (e1) {} }
+                                        } catch (eMute) {}
                                         try { state.choice.voice = vi; } catch (e) {}
                                         var newVoice = info.voice[vi];
                                         try { window._rezkaCurrentFilmId = curFilmId(); } catch (e) {}
@@ -1349,7 +1362,7 @@
                                                     voice_name: newVoice.name
                                                 };
                                                 if (sharedTimeline) newItem.timeline = sharedTimeline;
-                                                // Сохраняем возможность дальше менять озвучку — перевыставляем selected/enabled.
+                                                // Перевыставляем selected/enabled, чтобы дорожки оставались переключаемыми.
                                                 if (item.voiceovers) {
                                                     item.voiceovers.forEach(function (vo) {
                                                         vo.selected = vo.index === vi;
@@ -1357,9 +1370,16 @@
                                                     });
                                                     newItem.voiceovers = item.voiceovers;
                                                 }
-                                                Lampa.Player.play(newItem);
+                                                _curVoiceIdx = vi;
+                                                try { Lampa.Player.play(newItem); } catch (ePlay) {
+                                                    console.log('REZKA', 'Player.play error', ePlay && ePlay.message);
+                                                }
+                                                // Снимаем замок чуть позже — на случай, если onSelect повторно сработает
+                                                // от Lampa Select (двойной нажим/быстрый повтор).
+                                                setTimeout(function () { _switching = false; }, 1500);
                                             },
                                             function (msg) {
+                                                _switching = false;
                                                 Lampa.Noty.show('HDREZKA: не удалось переключить озвучку: ' + msg);
                                             });
                                     }
