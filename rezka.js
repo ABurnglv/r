@@ -21,7 +21,7 @@
      * ==================================================== */
     var manifest = {
         type: 'video',
-        version: '1.0.36',
+        version: '1.0.37',
         name: 'HDREZKA',
         description: 'Просмотр фильмов и сериалов с HDREZKA по личному аккаунту',
         component: 'rezka_online'
@@ -464,12 +464,16 @@
      *  Search on HDREZKA
      *  GET /engine/ajax/search.php?q=<title>
      * ==================================================== */
-    // searchRezka(query, year, cb)
+    // searchRezka(query, year, cb, opts)
     //   year: если задан — фильтрует items по совпадающему году (если есть совпадения)
     //   year='all' или false/0 — никакого фильтра, возвращает все результаты
-    function searchRezka(query, year, cb) {
+    //   opts.strict: если true и year задан — возвращает ТОЛЬКО items с точно совпадающим годом
+    //                (даже если результат пустой). Без этого флага при 0 точных совпадениях
+    //                возвращались все items, что приводило к открытию неверного фильма.
+    function searchRezka(query, year, cb, opts) {
+        opts = opts || {};
         var url = proxify(getDomain() + '/engine/ajax/search.php?q=' + encodeURIComponent(query));
-        console.log('REZKA', 'search start: query=', query, 'year=', year, 'url=', url);
+        console.log('REZKA', 'search start: query=', query, 'year=', year, 'strict=', !!opts.strict, 'url=', url);
         request({ url: url }, function (html) {
             var preview = (typeof html === 'string' ? html : JSON.stringify(html)).slice(0, 200);
             console.log('REZKA', 'search response len=', (typeof html === 'string' ? html.length : -1), 'preview=', preview);
@@ -504,7 +508,14 @@
             // если знаем год и не 'all' — предпочитаем точное совпадение
             if (year && year !== 'all') {
                 var exact = items.filter(function (i) { return i.year == String(year); });
-                if (exact.length) items = exact;
+                if (exact.length) {
+                    items = exact;
+                } else if (opts.strict) {
+                    // strict-year: при отсутствии точного совпадения — пустой результат,
+                    // чтобы вызывающий код мог попробовать fallback (например, поиск по original_title)
+                    console.log('REZKA', 'search strict-year: no exact-year items, returning empty');
+                    items = [];
+                }
             }
             console.log('REZKA', 'search parsed items=', items.length, items.length ? 'first=' + JSON.stringify(items[0]) : '');
             cb(items);
@@ -1914,8 +1925,9 @@
 
             var movie = object.movie || {};
             var title = movie.title || movie.name || '';
+            var origTitle = movie.original_title || movie.original_name || '';
             var year = (movie.release_date || movie.first_air_date || '').slice(0, 4);
-            console.log('REZKA', 'component initialize. movie.title=', title, 'year=', year, 'domain=', getDomain(), 'logged=', isLoggedIn());
+            console.log('REZKA', 'component initialize. movie.title=', title, 'origTitle=', origTitle, 'year=', year, 'domain=', getDomain(), 'logged=', isLoggedIn());
 
             // Внутренняя: обрабатываем info после fetchFilmPage — выделено в v1.0.28 для повторного использования при rezka_url override
             var onFilmInfo = function (info) {
@@ -1999,15 +2011,90 @@
                 return;
             }
 
-            searchRezka(title, year, function (results) {
-                if (!results.length) {
-                    self.activity.loader(false);
-                    showError('Ничего не найдено на HDREZKA');
-                    self.activity.toggle();
+            // v1.0.37: каскадный поиск, чтобы не открывать фильм другого года.
+            // Симптом: «На помощь!» (2026, Send Help) — по русскому названию HDREZKA отдаёт
+            // фильмы 1988/2012/2011/2019/2000 (ни один не 2026), старый код брал results[0].
+            // Новый алгоритм:
+            //   1) русское + strict-year     → если есть — открываем [0]
+            //   2) original + strict-year      → если есть — открываем [0]
+            //   3) русское без фильтра    → если есть — chooser (выбор вручную)
+            //   4) original без фильтра     → если есть — chooser
+            //   5) иначе — ошибка «Ничего не найдено»
+
+            // встроенный chooser — переоткрываем текущий activity с rezka_url выбранного варианта
+            var showChooser = function (sourceQuery, results) {
+                self.activity.loader(false);
+                var items = results.map(function (r) {
+                    var subtitle = r.details ? r.details : (r.year || '');
+                    return {
+                        title: r.title + (r.year ? '  (' + r.year + ')' : ''),
+                        subtitle: subtitle,
+                        __res: r
+                    };
+                });
+                console.log('REZKA', 'initialize: chooser triggered, sourceQuery=', sourceQuery, 'results=', results.length);
+                Lampa.Select.show({
+                    title: 'HDREZKA: выберите вариант (точное совпадение не найдено)',
+                    items: items,
+                    onBack: function () {
+                        try { Lampa.Activity.backward(); } catch (e) {}
+                    },
+                    onSelect: function (a) {
+                        var r = a.__res;
+                        console.log('REZKA', 'chooser-init: selected url=', r.url, 'title=', r.title, 'year=', r.year);
+                        // закрываем текущий пустой activity и открываем новый с rezka_url
+                        try { Lampa.Activity.backward(); } catch (e) {}
+                        setTimeout(function () {
+                            openRezka(movie, { rezka_url: r.url, titleSuffix: r.title + (r.year ? ' ' + r.year : '') });
+                        }, 50);
+                    }
+                });
+            };
+
+            // Шаг 1: русское + strict-year
+            searchRezka(title, year, function (resultsRu) {
+                if (resultsRu.length) {
+                    console.log('REZKA', 'search step1 (ru+strict-year): match found, opening', resultsRu[0].url);
+                    fetchFilmPage(resultsRu[0].url, onFilmInfo, onFilmErr);
                     return;
                 }
-                fetchFilmPage(results[0].url, onFilmInfo, onFilmErr);
-            });
+                // Шаг 2: original + strict-year
+                var hasOrig = origTitle && origTitle !== title;
+                var step2 = function (next) {
+                    if (!hasOrig) { next([]); return; }
+                    searchRezka(origTitle, year, next, { strict: true });
+                };
+                step2(function (resultsEn) {
+                    if (resultsEn.length) {
+                        console.log('REZKA', 'search step2 (en+strict-year): match found, opening', resultsEn[0].url);
+                        fetchFilmPage(resultsEn[0].url, onFilmInfo, onFilmErr);
+                        return;
+                    }
+                    // Шаг 3: русское без фильтра
+                    searchRezka(title, 'all', function (resultsAllRu) {
+                        if (resultsAllRu.length) {
+                            showChooser(title, resultsAllRu);
+                            return;
+                        }
+                        // Шаг 4: original без фильтра
+                        if (hasOrig) {
+                            searchRezka(origTitle, 'all', function (resultsAllEn) {
+                                if (resultsAllEn.length) {
+                                    showChooser(origTitle, resultsAllEn);
+                                    return;
+                                }
+                                self.activity.loader(false);
+                                showError('Ничего не найдено на HDREZKA по «' + title + '» / «' + origTitle + '»');
+                                self.activity.toggle();
+                            });
+                        } else {
+                            self.activity.loader(false);
+                            showError('Ничего не найдено на HDREZKA');
+                            self.activity.toggle();
+                        }
+                    });
+                });
+            }, { strict: true });
         };
     }
 
