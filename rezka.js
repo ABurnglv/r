@@ -21,7 +21,7 @@
      * ==================================================== */
     var manifest = {
         type: 'video',
-        version: '1.0.37',
+        version: '1.0.38',
         name: 'HDREZKA',
         description: 'Просмотр фильмов и сериалов с HDREZKA по личному аккаунту',
         component: 'rezka_online'
@@ -243,9 +243,43 @@
             withCredentials: true
         };
 
-        function callSilent() {
-            network.silent(opts.url, success, function (a, b) { error(a, b); },
-                opts.post || false,
+        // v1.0.38: гарантированно вызовём success/error ровно один раз —
+        // даже если silent зависнет (нет ни ответа, ни ошибки).
+        var settled = false;
+        var settleSuccess = function (data) {
+            if (settled) return; settled = true;
+            try { success(data); } catch (e) { console.log('REZKA', 'success cb threw', e && e.message); }
+        };
+        var settleError = function (a, b) {
+            if (settled) return; settled = true;
+            try { error(a, b); } catch (e) { console.log('REZKA', 'error cb threw', e && e.message); }
+        };
+        // hard-таймаут 20 сек: если ничего не пришло — error «timeout»
+        var hardTimer = setTimeout(function () {
+            if (!settled) {
+                console.log('REZKA', 'request HARD-TIMEOUT for', opts.url);
+                settleError({ status: 0 }, 'timeout');
+            }
+        }, 20000);
+        var origSuccess = function (data) {
+            clearTimeout(hardTimer);
+            settleSuccess(data);
+        };
+        var origError = function (a, b) {
+            clearTimeout(hardTimer);
+            settleError(a, b);
+        };
+
+        function callSilent(reason) {
+            console.log('REZKA', 'silent attempt' + (reason ? ' (' + reason + ')' : ''), 'url=', opts.url);
+            network.silent(opts.url, function (data) {
+                var len = (typeof data === 'string') ? data.length : -1;
+                console.log('REZKA', 'silent OK len=', len);
+                origSuccess(data);
+            }, function (a, b) {
+                console.log('REZKA', 'silent FAIL status=', (a && a.status) || a, 'msg=', b);
+                origError(a, b);
+            }, opts.post || false,
                 { dataType: opts.dataType || 'text', headers: safeHeaders });
         }
 
@@ -253,17 +287,23 @@
         try {
             if (typeof network["native"] === 'function' &&
                 Lampa.Platform && Lampa.Platform.is && Lampa.Platform.is('android')) {
-                network["native"](opts.url, success, function (a, b) {
+                network["native"](opts.url, function (data) {
+                    var len = (typeof data === 'string') ? data.length : -1;
+                    console.log('REZKA', 'native OK len=', len, 'url=', opts.url);
+                    origSuccess(data);
+                }, function (a, b) {
                     // fallback на silent в случае ошибки native-стека
-                    console.log('REZKA', 'native fail, falling back to silent', a, b);
-                    callSilent();
+                    console.log('REZKA', 'native fail, falling back to silent', a, b, 'url=', opts.url);
+                    callSilent('native-fail');
                 }, opts.post || false, params);
                 return network;
             }
-        } catch (e) { /* fall through to silent */ }
+        } catch (e) {
+            console.log('REZKA', 'native threw, fallback to silent:', e && e.message);
+        }
 
         // 2) silent для веб/iOS/Tizen — без запрещённых заголовков
-        callSilent();
+        callSilent('no-native');
         return network;
     }
 
@@ -533,6 +573,12 @@
         request({ url: proxify(filmUrl), dataType: 'text' }, function (str) {
             var slen = (str || '').length;
             console.log('REZKA', 'fetchFilmPage response len=', slen);
+            // v1.0.38: пустой/обрезанный ответ — выводим явную ошибку, а не «Здесь пусто»
+            if (slen < 1000) {
+                console.log('REZKA', 'fetchFilmPage ⚠️ пустой/короткий ответ (' + slen + ' байт). preview=', (typeof str === 'string' ? str.slice(0, 200) : str));
+                if (err) err({ status: 0 }, 'сервер вернул пустой ответ (' + slen + ' байт)');
+                return;
+            }
             // Диагностика: сервер отдаёт страницу входа — значит сессия не применилась
             if (typeof str === 'string' && /<title>\s*Вход\s*<\/title>/i.test(str)) {
                 console.log('REZKA', 'fetchFilmPage ⚠️ Сервер вернул страницу ЛОГИНА. cookie len=', getCookie().length, 'status=', Lampa.Storage.get(STORAGE.status));
