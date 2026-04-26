@@ -21,7 +21,7 @@
      * ==================================================== */
     var manifest = {
         type: 'video',
-        version: '1.0.40',
+        version: '1.0.41',
         name: 'HDREZKA',
         description: 'Просмотр фильмов и сериалов с HDREZKA по личному аккаунту',
         component: 'rezka_online'
@@ -34,11 +34,15 @@
         domain:   'rezka_domain',
         login:    'rezka_login',
         password: 'rezka_password',
-        cookie:   'rezka_cookie',     // dle_user_id=...; dle_password=...
+        cookie:   'rezka_cookie',     // dle_user_id=...; dle_password=... или [android-session:<ts>]
         status:   'rezka_status',     // 'logged' | 'guest' | 'error:<msg>'
         proxy:    'rezka_proxy_url',  // optional CORS proxy
-        quality:  'rezka_quality'     // выбранное качество (глобальный фолбэк): 'auto'|'2160p'|'1080p Ultra'|'1080p'|'720p'|'480p'|'360p'
+        quality:  'rezka_quality',    // выбранное качество (глобальный фолбэк)
+        loginTs:  'rezka_login_ts'    // timestamp последнего успешного логина — для авто-обновления раз в 3 дня
     };
+
+    // Интервал авто-перелога (3 дня в миллисекундах)
+    var RELOGIN_INTERVAL_MS = 3 * 24 * 60 * 60 * 1000;
 
     /* v1.0.32: per-film хранилище качества и сезона.
        filmId — это object.movie.id (TMDB id), стабильный per movie. */
@@ -86,6 +90,7 @@
         defaults[STORAGE.cookie]   = '';
         defaults[STORAGE.status]   = 'guest';
         defaults[STORAGE.proxy]    = '';
+        defaults[STORAGE.loginTs]  = 0;
         Object.keys(defaults).forEach(function (k) {
             try {
                 var cur = Lampa.Storage.get(k, '__none__');
@@ -136,7 +141,9 @@
             'X-Requested-With': 'XMLHttpRequest'
         };
         var ck = getCookie();
-        if (ck) headers['Cookie'] = ck;
+        // Не отправляем маркер [android-session:...] в Cookie — это не реальные cookies, а признак что логин
+        // был выполнен и cookies лежат в OkHttp jar; native-стек Lampa сам подставит их.
+        if (ck && ck.indexOf('[android-session') !== 0) headers['Cookie'] = ck;
         if (extra) for (var k in extra) headers[k] = extra[k];
         return headers;
     }
@@ -403,31 +410,44 @@
             }
 
             if (ok) {
-                // 1) пробуем достать cookies из document.cookie (на веб-Lampa может работать)
+                // 1) Пробуем достать cookies из document.cookie (веб-версия Lampa).
+                //    На Android этого не будет — dle_* идут с флагом HttpOnly,
+                //    они ложатся в OkHttp CookieJar и невидимы для JS.
                 var cookieStr = '';
                 try { cookieStr = document.cookie || ''; } catch (e) {}
                 var dle = cookieStr.split(';').map(function (s) { return s.trim(); })
                     .filter(function (s) { return /^dle_(user_id|password|hash|forum_sessions)=/.test(s); })
                     .join('; ');
-                if (dle) Lampa.Storage.set(STORAGE.cookie, dle);
-                Lampa.Storage.set(STORAGE.status, 'logged');
-                console.log('REZKA', 'login OK; document.cookie dle=', dle ? 'YES' : 'NO');
+                console.log('REZKA', 'login OK; document.cookie dle=', dle ? 'YES (' + dle.length + ' bytes)' : 'NO (HttpOnly/Android)');
 
-                // 2) Verification test: на Android cookies хранятся в OkHttp CookieJar.
-                // Чтобы убедиться что сессия применяется к последующим запросам —
-                // дёрнем главную и проверим, виден ли залогиненный пользователь.
+                // 2) Verification: дёрнем главную без явного Cookie-хедера.
+                //    На Android это проверит работает ли jar; на вебе — отправятся document.cookie.
+                // ВАЖНО: не пишем Storage.cookie ДО verify — иначе старый (протухший) cookie
+                // попадёт в хедеры verifySession и перебьёт jar.
+                Lampa.Storage.set(STORAGE.cookie, ''); // очистили старое на время проверки
                 verifySession(function (verified, hint) {
                     if (verified) {
                         console.log('REZKA', 'session verified via', hint);
-                        done(true, 'Вход успешен. Сессия активна (' + hint + ')');
+                        // В cookie пишем либо реальные dle, либо маркер что логин в jar.
+                        var saved = dle || '[android-session:' + Date.now() + ']';
+                        Lampa.Storage.set(STORAGE.cookie, saved);
+                        Lampa.Storage.set(STORAGE.status, 'logged');
+                        Lampa.Storage.set(STORAGE.loginTs, Date.now());
+                        done(true, 'Вход успешен (' + hint + '). ' +
+                            (dle ? 'cookies сохранены: ' + dle.length + ' байт' : 'cookies в OkHttp jar (Android)'));
                     } else {
                         console.log('REZKA', 'session verify FAILED:', hint);
-                        // Логин-ответ был ОК, но сервер всё равно отдаёт страницу логина —
-                        // значит cookies не доходят до native-стека.
-                        Lampa.Storage.set(STORAGE.status, 'logged'); // оставим logged — пробуем
-                        done(true,
-                            'Вход OK, но сессия не пробрасывается в Lampa-Android. ' +
-                            'Используйте "Cookie (ручной вход)" — скопируйте dle_user_id и dle_password из браузера');
+                        if (dle) {
+                            // Есть реальные cookies в браузере — сохраняем их.
+                            Lampa.Storage.set(STORAGE.cookie, dle);
+                            Lampa.Storage.set(STORAGE.status, 'logged');
+                            Lampa.Storage.set(STORAGE.loginTs, Date.now());
+                            done(true, 'Вход OK. cookies: ' + dle.length + ' байт (verify: ' + hint + ')');
+                        } else {
+                            // Логин-ответ был ОК, но сессия не подтверждена.
+                            Lampa.Storage.set(STORAGE.status, 'error:verify failed');
+                            done(false, 'Вход ОК по ответу сервера, но сессия не пробросилась (' + hint + '). Используйте ручной ввод cookie');
+                        }
                     }
                 });
             } else {
@@ -440,8 +460,9 @@
         // marker. If document.cookie has dle_user_id we're already done.
         // Otherwise we hope that Android OkHttp's CookieJar carries cookies forward.
         function verifySession(cb) {
-            // shortcut: если у нас уже есть Storage.cookie — считаем верифицированным
-            if (getCookie()) return cb(true, 'document.cookie');
+            // shortcut: если Storage.cookie — реальные dle_* (не маркер), считаем верифицированным
+            var ck = getCookie();
+            if (ck && ck.indexOf('[android-session') !== 0 && /dle_user_id=/.test(ck)) return cb(true, 'document.cookie');
 
             var net = new Lampa.Reguest();
             net.timeout(10000);
@@ -490,6 +511,7 @@
             .join('; ');
         Lampa.Storage.set(STORAGE.cookie, dle);
         Lampa.Storage.set(STORAGE.status, 'logged');
+        Lampa.Storage.set(STORAGE.loginTs, Date.now());
 
         // Сразу проверим что сессия действительно работает
         var net = new Lampa.Reguest();
@@ -516,6 +538,7 @@
     function logout() {
         Lampa.Storage.set(STORAGE.cookie, '');
         Lampa.Storage.set(STORAGE.status, 'guest');
+        Lampa.Storage.set(STORAGE.loginTs, 0);
     }
 
     /* ====================================================
@@ -2429,7 +2452,23 @@
      * ==================================================== */
     function statusLabel() {
         var s = Lampa.Storage.get(STORAGE.status) || 'guest';
-        if (s === 'logged') return '🟢 Вы вошли в аккаунт';
+        var ck = (Lampa.Storage.get(STORAGE.cookie) || '').trim();
+        var ts = parseInt(Lampa.Storage.get(STORAGE.loginTs, 0), 10) || 0;
+        if (s === 'logged') {
+            var info = '';
+            if (ck.indexOf('[android-session') === 0) {
+                info = ' · cookies в jar (Android)';
+            } else if (/dle_user_id=/.test(ck)) {
+                info = ' · cookies: ' + ck.length + ' байт';
+            }
+            if (ts) {
+                var hours = Math.floor((Date.now() - ts) / 3600000);
+                if (hours < 1) info += ' · обновлены только что';
+                else if (hours < 24) info += ' · возраст ' + hours + 'ч';
+                else info += ' · возраст ' + Math.floor(hours/24) + 'д';
+            }
+            return '🟢 Вы вошли' + info;
+        }
         if (s.indexOf('error:') === 0) return '🔴 Ошибка: ' + s.substring(6);
         return '⚪ Не авторизованы';
     }
@@ -2461,13 +2500,13 @@
             onChange: function () { Lampa.Storage.set(STORAGE.status, 'guest'); }
         });
 
-        // ── ОСНОВНОЙ путь: вход по Cookie ───────────────────────────
+        // ── РЕЗЕРВНЫЙ путь: вход по Cookie (заполняется автоматически после логина) ───────
         Lampa.SettingsApi.addParam({
             component: 'rezka',
             param: { name: STORAGE.cookie, type: 'input', values: '', default: '' },
             field: {
-                name: '🔑 Cookie из браузера (РЕКОМЕНДУЕТСЯ)',
-                description: 'Вставьте: dle_user_id=12345; dle_password=abcd... (см. инструкцию ниже)'
+                name: '🔑 Cookie',
+                description: 'Заполняется автоматически после входа. Или вставьте вручную: dle_user_id=12345; dle_password=...'
             }
         });
 
@@ -2530,34 +2569,41 @@
             }
         });
 
-        // ── Резервный путь: автологин (часто не работает на Android) ──
+        // ── ОСНОВНОЙ путь: логин по логину/паролю (cookies подхватятся и запишутся в поле Cookie выше) ──
         Lampa.SettingsApi.addParam({
             component: 'rezka',
             param: { name: STORAGE.login, type: 'input', values: '', default: '' },
-            field: { name: 'Логин / E-mail (резервный путь)', description: 'Email или имя пользователя HDREZKA' }
+            field: { name: '👤 Логин / E-mail', description: 'Email или имя пользователя HDREZKA' }
         });
 
         Lampa.SettingsApi.addParam({
             component: 'rezka',
             param: { name: STORAGE.password, type: 'input', values: '', default: '' },
-            field: { name: 'Пароль', description: 'Хранится локально на устройстве' }
+            field: { name: '🔒 Пароль', description: 'Хранится локально на устройстве' }
         });
 
         Lampa.SettingsApi.addParam({
             component: 'rezka',
             param: { name: 'rezka_login_button', type: 'trigger' },
-            field: { name: 'Войти автоматически', description: 'На Lampa-Android часто не работает — используйте Cookie выше' },
+            field: { name: '✅ Войти в аккаунт', description: 'Сессия будет обновляться автоматически раз в 3 дня' },
             onChange: function () {
-                var login = Lampa.Storage.get(STORAGE.login);
-                var pwd   = Lampa.Storage.get(STORAGE.password);
+                var login = (Lampa.Storage.get(STORAGE.login) || '').trim();
+                var pwd   = (Lampa.Storage.get(STORAGE.password) || '').trim();
                 if (!login || !pwd) {
                     Lampa.Noty.show('Введите логин и пароль');
                     return;
                 }
-                Lampa.Noty.show('Авторизация на HDREZKA…');
+                Lampa.Noty.show('HDREZKA: вход…');
                 authenticate(login, pwd, function (ok, msg) {
                     Lampa.Noty.show((ok ? '✓ ' : '✗ ') + msg);
-                    $('[data-name="rezka_status_view"] .settings-param__descr').text(statusLabel());
+                    try {
+                        $('[data-name="rezka_status_view"] .settings-param__descr').text(statusLabel());
+                        // Обновляем видимое значение cookie-поля
+                        var ck = Lampa.Storage.get(STORAGE.cookie) || '';
+                        var cookieRow = $('[data-name="' + STORAGE.cookie + '"]');
+                        cookieRow.find('.settings-param__value').text(ck);
+                        cookieRow.find('input').val(ck);
+                    } catch (e) {}
                 });
             }
         });
@@ -2695,6 +2741,38 @@
         }
     }
 
+    /* ====================================================
+     *  v1.0.40: Авто-перелог раз в RELOGIN_INTERVAL_MS (3 дня).
+     *  Цель — держать cookie свежими, чтобы избежать 404 от rezka.fi
+     *  когда сервер ротирует PHPSESSID/dle_hash.
+     * ==================================================== */
+    function maybeAutoRelogin() {
+        try {
+            var login = (Lampa.Storage.get(STORAGE.login) || '').trim();
+            var pwd = (Lampa.Storage.get(STORAGE.password) || '').trim();
+            if (!login || !pwd) {
+                console.log('REZKA', 'auto-relogin: логин/пароль не заданы, пропускаю');
+                return;
+            }
+            var ts = parseInt(Lampa.Storage.get(STORAGE.loginTs, 0), 10) || 0;
+            var age = Date.now() - ts;
+            if (ts && age < RELOGIN_INTERVAL_MS) {
+                var hoursLeft = Math.round((RELOGIN_INTERVAL_MS - age) / 3600000);
+                console.log('REZKA', 'auto-relogin: cookies свежие (возраст ' + Math.round(age/3600000) + 'ч, до обновления ' + hoursLeft + 'ч)');
+                return;
+            }
+            console.log('REZKA', 'auto-relogin: возраст ' + Math.round(age/3600000) + 'ч ≥ 72ч, перелогиниваюсь…');
+            authenticate(login, pwd, function (ok, msg) {
+                console.log('REZKA', 'auto-relogin result:', ok ? 'OK' : 'FAIL', msg);
+                if (Lampa.Noty && Lampa.Noty.show) {
+                    Lampa.Noty.show('HDREZKA: авто-обновление сессии — ' + (ok ? '✓ ' : '✗ ') + msg);
+                }
+            });
+        } catch (e) {
+            console.log('REZKA', 'maybeAutoRelogin error:', e && e.message);
+        }
+    }
+
     function startPlugin() {
         if (window.rezka_plugin_started) return;
         window.rezka_plugin_started = true;
@@ -2707,6 +2785,9 @@
             addOnlineSource();
             addCardButton();
             registerGlobalQualityListener();
+            // Авто-перелог: проверяем при старте и каждые 6 часов.
+            setTimeout(maybeAutoRelogin, 5000);
+            setInterval(maybeAutoRelogin, 6 * 60 * 60 * 1000);
             console.log('REZKA', 'plugin started OK');
         } catch (err) {
             console.log('REZKA', 'startPlugin error:', err && (err.stack || err.message));
