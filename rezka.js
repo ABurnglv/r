@@ -21,7 +21,7 @@
      * ==================================================== */
     var manifest = {
         type: 'video',
-        version: '1.0.34',
+        version: '1.0.35',
         name: 'HDREZKA',
         description: 'Просмотр фильмов и сериалов с HDREZKA по личному аккаунту',
         component: 'rezka_online'
@@ -1379,12 +1379,26 @@
                 var cachedMap = (sNumGlobal && object.movie && object.movie.id)
                     ? _tmdbEpCache[object.movie.id + ':' + sNumGlobal]
                     : null;
+                // v1.0.35: собираем прогресс Timeline для каждой серии чтобы выбрать цель автофокуса.
+                var focusCandidates = []; // [{eNum, percent, time, idx, hash}]
                 items.forEach(function (ep, epIdx) {
                     // Hash каждой серии индивидуален (формула lampac):
                     // [season_number, ':' если season>10, episode_number, original_title]
                     var sNum = parseInt(ep.season_id || season.id, 10) || 0;
                     var eNum = parseInt(ep.episode_id || ep.name, 10) || 0;
                     var hash = strHash([sNum, sNum > 10 ? ':' : '', eNum, origTitleS].join(''));
+                    try {
+                        var tlView = Lampa.Timeline ? Lampa.Timeline.view(hash) : null;
+                        if (tlView) {
+                            focusCandidates.push({
+                                eNum: eNum,
+                                percent: parseFloat(tlView.percent) || 0,
+                                time: parseFloat(tlView.time) || 0,
+                                idx: epIdx,
+                                hash: hash
+                            });
+                        }
+                    } catch (e) {}
                     // Имя серии: берём из кеша TMDB сразу если есть, или из ранее сохранённого ep.tmdb_name.
                     // Иначе — фолбэк "Серия N" до результата асинхронного fetchTMDBEpisodes.
                     var cachedEntry = cachedMap && cachedMap[eNum];
@@ -1411,6 +1425,29 @@
                     html.append(card);
                     renderedCards.push({ card: card, ep: ep, idx: epIdx, eNum: eNum });
                 });
+                // v1.0.35: выбираем серию для автофокуса:
+                //  1) есть недосмотренная (0 < percent < 90) — самая поздняя среди таких;
+                //  2) иначе — самая поздняя с любым прогрессом (досмотренные 100%);
+                //  3) иначе — первая серия (дефолт Lampa).
+                var focusCard = null;
+                try {
+                    var inProgress = focusCandidates.filter(function (c) { return c.percent > 0 && c.percent < 90; });
+                    var watched   = focusCandidates.filter(function (c) { return c.percent > 0; });
+                    var pickFromList = function (list) {
+                        if (!list.length) return null;
+                        // самая поздняя по номеру серии
+                        list.sort(function (a, b) { return b.eNum - a.eNum; });
+                        return list[0];
+                    };
+                    var pick = pickFromList(inProgress) || pickFromList(watched);
+                    if (pick) {
+                        var rc = renderedCards.filter(function (r) { return r.idx === pick.idx; })[0];
+                        if (rc) focusCard = rc.card;
+                        console.log('REZKA', 'autofocus episode eNum=' + pick.eNum + ' percent=' + pick.percent + ' (in_progress=' + inProgress.length + ', watched=' + watched.length + ')');
+                    }
+                } catch (e) { console.log('REZKA', 'autofocus pick error:', e && e.message); }
+                // Отложенно фокусируем — collectionFocus должен вызываться ПОСЛЕ scroll.append + Controller.enable.
+                state._pendingFocusEl = focusCard ? focusCard[0] : null;
                 if (!items.length) {
                     html.append('<div style="padding:1em;color:#ccc">Без серий в этом сезоне</div>');
                 }
@@ -1480,6 +1517,21 @@
             }
             scroll.append(html);
             Lampa.Controller.enable('content');
+            // v1.0.35: автофокус на последнюю просматривавшуюся серию (если есть прогресс).
+            try {
+                if (state._pendingFocusEl) {
+                    var targetEl = state._pendingFocusEl;
+                    state._pendingFocusEl = null;
+                    // Два setTimeout чтобы: 1) дать DOM вставиться, 2) Lampa.Controller.enable успел примениться.
+                    setTimeout(function () {
+                        try {
+                            Lampa.Controller.collectionFocus(targetEl, scroll.render());
+                        } catch (er) {
+                            console.log('REZKA', 'collectionFocus error:', er && er.message);
+                        }
+                    }, 0);
+                }
+            } catch (e) {}
         }
 
         // Качества которые отдаёт HDREZKA (порядок от лучшего к худшему).
