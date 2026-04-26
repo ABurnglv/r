@@ -21,7 +21,7 @@
      * ==================================================== */
     var manifest = {
         type: 'video',
-        version: '1.0.24',
+        version: '1.0.25',
         name: 'HDREZKA',
         description: 'Просмотр фильмов и сериалов с HDREZKA по личному аккаунту',
         component: 'rezka_online'
@@ -739,9 +739,23 @@
                 var items = parsePlaylist(decoded);
                 if (!items.length) { err && err('Пустой плейлист'); return; }
                 var qualities = {};
-                // Сортируем от лучшего к худшему для корректного Player.getUrlQuality fallback
+                var qPrefForSort = (function () { try { return Lampa.Storage.get(STORAGE.quality, 'auto'); } catch (e) { return 'auto'; } })();
+                // Сортируем от лучшего к худшему для корректного Player.getUrlQuality fallback.
+                // При равном parseInt (напр. 1080p и 1080p Ultra) — ставим выбранное пользователем вариант ПЕРВЫМ,
+                // чтобы Lampa.Player.getUrlQuality (`for(var q in quality)`) выбрал именно его.
                 var sortedItems = items.slice().sort(function (a, b) {
-                    return (parseInt(b.label, 10) || 0) - (parseInt(a.label, 10) || 0);
+                    var ha = parseInt(a.label, 10) || 0;
+                    var hb = parseInt(b.label, 10) || 0;
+                    if (ha !== hb) return hb - ha;
+                    // равные по высоте: предпочтённый ярлык — раньше
+                    if (qPrefForSort && qPrefForSort !== 'auto') {
+                        if (a.label === qPrefForSort) return -1;
+                        if (b.label === qPrefForSort) return 1;
+                    }
+                    // иначе: Ultra раньше обычного (более качественный битрейт по умолчанию)
+                    var ua = /ultra/i.test(a.label) ? 1 : 0;
+                    var ub = /ultra/i.test(b.label) ? 1 : 0;
+                    return ub - ua;
                 });
                 // Lampa.Player выбирает уровень через parseInt(ключ) == Storage.video_quality_default.
                 // На rezka бывают ключи '4K' (parseInt=4) и '2K' (parseInt=2) — они никогда не
@@ -1426,6 +1440,13 @@
         // Дело в том, что разные переводчики на rezka покрывают разные сезоны
         // (например Дубляж неоф. у Сериала 31432 есть только для Сезона 5).
         function reloadEpisodesForVoice(voice, done) {
+            var info = state && state.info;
+            if (!info) {
+                console.log('REZKA', 'reloadEpisodesForVoice: пропускаю — state.info пуст');
+                try { Lampa.Noty.show('HDREZKA: нет данных фильма для смены озвучки'); } catch (e) {}
+                done && done();
+                return;
+            }
             if (!voice || !voice.id || !info.film_id) {
                 console.log('REZKA', 'reloadEpisodesForVoice: пропускаю — нет voice/film_id');
                 done && done();
