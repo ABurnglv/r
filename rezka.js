@@ -21,7 +21,7 @@
      * ==================================================== */
     var manifest = {
         type: 'video',
-        version: '1.0.21',
+        version: '1.0.22',
         name: 'HDREZKA',
         description: 'Просмотр фильмов и сериалов с HDREZKA по личному аккаунту',
         component: 'rezka_online'
@@ -673,8 +673,21 @@
      * ==================================================== */
     function getStream(info, voice, season, episode, cb, err) {
         var url = proxify(getDomain() + '/ajax/get_cdn_series/?t=' + Date.now());
+        // ГАРДЫ: пустой translator_id или film_id → rezka отвечает "Время сессии истекло".
+        // Лучше сразу выдать ясный ответ чем ввести в заблуждение.
+        if (!info || !info.film_id) {
+            console.log('REZKA', 'getStream ABORT: empty film_id', info);
+            err && err('Не удалось определить ID фильма на rezka');
+            return;
+        }
+        if (!voice || !voice.id || String(voice.id).trim() === '' || String(voice.id) === '0') {
+            console.log('REZKA', 'getStream ABORT: empty translator_id, voice=', JSON.stringify(voice));
+            err && err('Не удалось определить вариант озвучки (translator_id)');
+            return;
+        }
         var post;
         if (info.is_series && season && episode) {
+            // Для сериала НЕ передаём is_camrip/is_ads/is_director — эти поля только для фильмов.
             post = 'id=' + encodeURIComponent(info.film_id) +
                    '&translator_id=' + encodeURIComponent(voice.id) +
                    '&season=' + encodeURIComponent(season.id) +
@@ -691,6 +704,8 @@
                    '&action=get_movie';
         }
         console.log('REZKA', 'getStream POST voice=', voice && voice.name, 'tid=', voice && voice.id, 'film_id=', info.film_id, 's=', season && season.id, 'e=', episode && episode.episode_id);
+        console.log('REZKA', 'getStream POST body=', post);
+        console.log('REZKA', 'getStream POST url=', url);
 
         // Используем общий request() helper — он умеет network.native (Android, обходит CORS,
         // подставляет ручные cookies). XMLHttpRequest напрямую не работает: CORS блокирует
@@ -708,13 +723,16 @@
                 var json = typeof resp === 'string' ? JSON.parse(resp) : resp;
                 if (!json || !json.success) {
                     var srvMsg = (json && json.message) || 'Сервер вернул ошибку';
-                    // Частый кейс — "Время сессии истекло". Подскажем пользователю
-                    // что нужно обновить куки в настройках плагина.
-                    if (/истек|сесси|expired|not authoriz|unauth/i.test(srvMsg)) {
-                        srvMsg = 'Сессия rezka истекла. Обновите cookie в Настройки → HDREZKA → Cookie';
+                    // rezka отвечает "Время сессии истекло" не только при невалидных cookie,
+                    // но и при невалидных полях (пустой translator_id, нечисловые season/episode).
+                    // Поэтому показываем как исходный message, так и параметры запроса.
+                    var diag = '';
+                    if (/истек|сесси|expired/i.test(srvMsg)) {
+                        diag = ' [tid=' + (voice && voice.id) + ' fid=' + (info && info.film_id) +
+                               ' s=' + (season && season.id) + ' e=' + (episode && episode.episode_id) + ']';
                     }
-                    console.log('REZKA', 'getStream server fail', srvMsg, '| raw:', resp && String(resp).slice(0, 300));
-                    err && err(srvMsg);
+                    console.log('REZKA', 'getStream server fail. srvMsg=', srvMsg, '| raw=', resp && String(resp).slice(0, 500), '| sentBody=', post);
+                    err && err(srvMsg + diag);
                     return;
                 }
                 var decoded = decodeTrash(json.url);
