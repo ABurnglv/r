@@ -21,7 +21,7 @@
      * ==================================================== */
     var manifest = {
         type: 'video',
-        version: '1.0.25',
+        version: '1.0.26',
         name: 'HDREZKA',
         description: 'Просмотр фильмов и сериалов с HDREZKA по личному аккаунту',
         component: 'rezka_online'
@@ -1418,9 +1418,11 @@
                     // HTML страницы содержит сезоны только для дефолтного переводчика —
                     // для остальных нужно дозапросить через ajax/get_cdn_series action=get_episodes.
                     if (info.is_series) {
-                        state.choice.season = 0;
+                        // Запоминаем текущий сезон — чтобы reloadEpisodesForVoice постарался остаться на нём.
+                        var prevSeason = info.season && info.season[state.choice.season];
+                        var prevSeasonId = prevSeason ? prevSeason.id : null;
                         setTimeout(Lampa.Select.close, 10);
-                        reloadEpisodesForVoice(info.voice[state.choice.voice], function () {
+                        reloadEpisodesForVoice(info.voice[state.choice.voice], prevSeasonId, function () {
                             buildFilter();
                             buildList();
                         });
@@ -1439,7 +1441,11 @@
         // через ajax/get_cdn_series action=get_episodes.
         // Дело в том, что разные переводчики на rezka покрывают разные сезоны
         // (например Дубляж неоф. у Сериала 31432 есть только для Сезона 5).
-        function reloadEpisodesForVoice(voice, done) {
+        function reloadEpisodesForVoice(voice, preferredSeasonId, done) {
+            // Совместимость: второй арг может быть done-коллбэком (старый вызов).
+            if (typeof preferredSeasonId === 'function' && typeof done === 'undefined') {
+                done = preferredSeasonId; preferredSeasonId = null;
+            }
             var info = state && state.info;
             if (!info) {
                 console.log('REZKA', 'reloadEpisodesForVoice: пропускаю — state.info пуст');
@@ -1503,9 +1509,24 @@
                     });
                     if (newSeasons.length) info.season = newSeasons;
                     if (newEpisodes.length) info.episode = newEpisodes;
-                    console.log('REZKA', 'reloadEpisodesForVoice: получено ' + newSeasons.length + ' сезонов, ' + newEpisodes.length + ' эпизодов');
-                    // Сбросим выбранный сезон на первый из новых.
-                    state.choice.season = 0;
+                    console.log('REZKA', 'reloadEpisodesForVoice: получено ' + newSeasons.length + ' сезонов, ' + newEpisodes.length + ' эпизодов' + (preferredSeasonId ? ', хотели season=' + preferredSeasonId : ''));
+                    // Пытаемся остаться на том же сезоне, что был выбран до смены озвучки.
+                    // Если у новой озвучки этого сезона нет — берём последний из доступных.
+                    var matchedIdx = -1;
+                    if (preferredSeasonId != null) {
+                        for (var si = 0; si < info.season.length; si++) {
+                            if (String(info.season[si].id) === String(preferredSeasonId)) { matchedIdx = si; break; }
+                        }
+                    }
+                    if (matchedIdx >= 0) {
+                        state.choice.season = matchedIdx;
+                        console.log('REZKA', 'reloadEpisodesForVoice: сезон ' + preferredSeasonId + ' найден в новой озвучке (idx=' + matchedIdx + ')');
+                    } else {
+                        state.choice.season = info.season.length ? info.season.length - 1 : 0;
+                        if (preferredSeasonId != null) {
+                            console.log('REZKA', 'reloadEpisodesForVoice: сезон ' + preferredSeasonId + ' НЕТ у новой озвучки, ухожу на последний (idx=' + state.choice.season + ')');
+                        }
+                    }
                 } catch (e) {
                     console.log('REZKA', 'reloadEpisodesForVoice parse error:', e && e.message, 'raw=', rawHead);
                     try { Lampa.Noty.show('HDREZKA: ошибка парсинга ответа смены озвучки — ' + (e && e.message)); } catch (e2) {}
@@ -1570,6 +1591,31 @@
                         state.choice.season = info.season.length - 1;
                     }
                     self.activity.loader(false);
+                    // ФИЛЬМ (не сериал): пользователь нажал «HDREZKA» и ожидает немедленного воспроизведения.
+                    // Карточка-промежуток была бы лишним кликом — сразу запускаем плеер и выкатываемся назад.
+                    if (!info.is_series) {
+                        if (!info.voice || !info.voice.length) {
+                            showError('Нет доступных озвучек');
+                            self.activity.toggle();
+                            return;
+                        }
+                        var defIdx = pickDefaultVoiceIdx(info.voice);
+                        console.log('REZKA', 'auto-play film: пропускаю экран выбора, запускаю playFilm(defIdx=' + defIdx + ')');
+                        try { playFilm(info, defIdx); } catch (e) {
+                            console.log('REZKA', 'auto-play film error:', e && e.message);
+                            showError('Не удалось запустить воспроизведение: ' + (e && e.message));
+                            self.activity.toggle();
+                            return;
+                        }
+                        // Убираем невидимый activity из стека — чтобы при выходе из плеера
+                        // пользователь вернулся сразу на карточку фильма, а не на пустой экран плагина.
+                        setTimeout(function () {
+                            try { Lampa.Activity.backward(); } catch (e2) {
+                                console.log('REZKA', 'Activity.backward error:', e2 && e2.message);
+                            }
+                        }, 100);
+                        return;
+                    }
                     buildFilter();
                     buildList();
                     self.activity.toggle();
