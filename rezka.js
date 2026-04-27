@@ -21,7 +21,7 @@
      * ==================================================== */
     var manifest = {
         type: 'video',
-        version: '1.0.52',
+        version: '1.0.53',
         name: 'HDREZKA',
         description: 'Просмотр фильмов и сериалов с HDREZKA по личному аккаунту',
         component: 'rezka_online'
@@ -1470,46 +1470,145 @@
                     first.playlist = playlist;
 
                     // Сериал: добавляем «voiceovers» — в плеере это кнопка «Дорожки» с выбором озвучки.
-                    // При выборе — закрываем плеер и перезапускаем на той же серии с новой озвучкой.
+                    // v1.0.53: переключение озвучки «на лету» — БЕЗ закрытия плеера, аналогично фильмам.
                     if (info.voice && info.voice.length > 1) {
                         try {
+                            // Состояние, общее для всех вариантов озвучки в данном плеер-сеансе.
+                            // Сохраняем в замыкании, обновляем при каждом успешном переключении.
+                            var _ctx = {
+                                info: info,
+                                voice: voice,
+                                season: season,
+                                items: items,
+                                curIdx: info.voice.indexOf(voice),
+                                switching: false
+                            };
+
+                            // Строим playlist для произвольных параметров (используется при переключении).
+                            // Возвращает { playlist, first, firstData }. firstData нужен только для первого старта;
+                            // при переключении мы заранее получаем поток текущей серии и подставляем url.
+                            function buildPlaylist(ni, nv, nseason, nitems, nepIdx, firstData) {
+                                var pl = nitems.map(function (ep, i) {
+                                    var sNum = parseInt(ep.season_id || nseason.id, 10) || 0;
+                                    var eNum = parseInt(ep.episode_id || ep.name, 10) || 0;
+                                    var epLabel = ep.tmdb_name || ep.name || ('Серия ' + (i + 1));
+                                    var cell = {
+                                        title: movieTitle + ' — ' + epLabel,
+                                        season: sNum,
+                                        episode: eNum,
+                                        voice_name: nv.name,
+                                        _ep_idx: i
+                                    };
+                                    try { if (Lampa.Timeline) cell.timeline = Lampa.Timeline.view(epHash(ep)); } catch (e) {}
+                                    if (i === nepIdx) {
+                                        cell.url = firstData.file;
+                                        cell.quality = firstData.quality;
+                                        cell.subtitles = firstData.subtitles;
+                                    } else {
+                                        cell.url = function (call) {
+                                            getStream(ni, nv, nseason, ep,
+                                                function (data) {
+                                                    cell.url = data.file;
+                                                    cell.quality = data.quality;
+                                                    cell.subtitles = data.subtitles;
+                                                    call();
+                                                },
+                                                function () {
+                                                    cell.url = '';
+                                                    Lampa.Noty.show('HDREZKA: не удалось получить ссылку');
+                                                    call();
+                                                });
+                                        };
+                                    }
+                                    return cell;
+                                });
+                                return { playlist: pl, first: pl[nepIdx] };
+                            }
+
                             var voiceovers = info.voice.map(function (v, vi) {
                                 return {
                                     label: v.name,
                                     title: v.name,
                                     language: v.name,
                                     index: vi,
-                                    selected: vi === info.voice.indexOf(voice),
-                                    enabled:  vi === info.voice.indexOf(voice),
+                                    selected: vi === _ctx.curIdx,
+                                    enabled:  vi === _ctx.curIdx,
                                     onSelect: function (a) {
-                                        if (vi === info.voice.indexOf(voice)) return; // тот же выбор
-                                        // Из плеера берём текущую серию и сезон
+                                        if (_ctx.switching) {
+                                            console.log('REZKA', 'series voice switch ignored: in progress');
+                                            return;
+                                        }
+                                        if (vi === _ctx.curIdx) {
+                                            console.log('REZKA', 'series voice switch ignored: same idx=' + vi);
+                                            return;
+                                        }
+                                        _ctx.switching = true;
+
+                                        // Текущая серия из плеера.
                                         var pdata = {};
                                         try { pdata = Lampa.Player.playdata() || {}; } catch (e) {}
                                         var curEpIdx = (typeof pdata._ep_idx === 'number') ? pdata._ep_idx : epIdx;
-                                        console.log('REZKA', 'voice change in player:', voice.name, '->', v.name, 'epIdx=', curEpIdx);
+                                        console.log('REZKA', 'series voice change in-place: ' + _ctx.voice.name + ' -> ' + v.name + ' epIdx=' + curEpIdx);
                                         Lampa.Noty.show('HDREZKA: переключаю на «' + v.name + '»…');
-                                        try { Lampa.Player.close(); } catch (e) {}
-                                        // Обновляем voice + серии для этой озвучки (может потребоваться get_episodes для другого переводчика)
+
+                                        // Сразу глушим звук старого потока, чтобы не было наложения.
+                                        try {
+                                            var $vid = $('video');
+                                            if ($vid && $vid.length) { try { $vid[0].pause(); } catch (e1) {} }
+                                        } catch (eMute) {}
+
                                         try { state.choice.voice = vi; } catch (e) {}
-                                        var _replay = function () {
-                                        if (typeof reloadEpisodesForVoice === 'function') {
-                                            reloadEpisodesForVoice(v, season.id, function () {
-                                                try {
-                                                    var ni = state.info;
-                                                    var newSeason = ni.season[state.choice.season] || season;
-                                                    var newItems  = (ni.episode || []).filter(function (e) { return String(e.season_id) === String(newSeason.id); });
-                                                    if (!newItems.length) newItems = items;
-                                                    var newEpIdx  = Math.min(curEpIdx, newItems.length - 1);
-                                                    if (newEpIdx < 0) newEpIdx = 0;
-                                                    playSeries(ni, v, newSeason, newItems, newEpIdx);
-                                                } catch (e) { console.log('REZKA', 'voice-change replay error', e && e.message); Lampa.Noty.show('HDREZKA: не удалось переключить озвучку'); }
-                                            });
-                                        } else {
-                                            playSeries(info, v, season, items, curEpIdx);
-                                        }
+
+                                        // Перезагружаем серии для новой озвучки (на случай, если у переводчика другой набор).
+                                        var afterReload = function () {
+                                            try {
+                                                var ni = state.info || _ctx.info;
+                                                var newSeason = (ni.season && ni.season[state.choice.season]) || _ctx.season;
+                                                var newItems  = (ni.episode || []).filter(function (e) { return String(e.season_id) === String(newSeason.id); });
+                                                if (!newItems.length) newItems = _ctx.items;
+                                                var newEpIdx  = Math.min(curEpIdx, newItems.length - 1);
+                                                if (newEpIdx < 0) newEpIdx = 0;
+                                                var newEp = newItems[newEpIdx];
+
+                                                getStream(ni, v, newSeason, newEp,
+                                                    function (firstData2) {
+                                                        applyQualityToPlayer();
+                                                        var built = buildPlaylist(ni, v, newSeason, newItems, newEpIdx, firstData2);
+                                                        // Перевыставляем selected/enabled, чтобы дорожки оставались переключаемыми.
+                                                        voiceovers.forEach(function (vo) {
+                                                            vo.selected = vo.index === vi;
+                                                            vo.enabled  = vo.index === vi;
+                                                        });
+                                                        built.first.playlist = built.playlist;
+                                                        built.first.voiceovers = voiceovers;
+                                                        // Обновляем контекст для следующих переключений.
+                                                        _ctx.info = ni;
+                                                        _ctx.voice = v;
+                                                        _ctx.season = newSeason;
+                                                        _ctx.items = newItems;
+                                                        _ctx.curIdx = vi;
+                                                        try { Lampa.Player.play(built.first); } catch (ePlay) {
+                                                            console.log('REZKA', 'series Player.play error', ePlay && ePlay.message);
+                                                        }
+                                                        try { Lampa.Player.playlist(built.playlist); } catch (ePl) {}
+                                                        setTimeout(function () { _ctx.switching = false; }, 1500);
+                                                    },
+                                                    function (msg) {
+                                                        _ctx.switching = false;
+                                                        Lampa.Noty.show('HDREZKA: не удалось переключить озвучку: ' + msg);
+                                                    });
+                                            } catch (eX) {
+                                                _ctx.switching = false;
+                                                console.log('REZKA', 'series voice in-place error', eX && eX.message);
+                                                Lampa.Noty.show('HDREZKA: ошибка при переключении озвучки');
+                                            }
                                         };
-                                        setTimeout(_replay, 200);
+
+                                        if (typeof reloadEpisodesForVoice === 'function') {
+                                            reloadEpisodesForVoice(v, _ctx.season.id, afterReload);
+                                        } else {
+                                            afterReload();
+                                        }
                                     }
                                 };
                             });
