@@ -21,7 +21,7 @@
      * ==================================================== */
     var manifest = {
         type: 'video',
-        version: '1.0.64',
+        version: '1.0.65',
         name: 'HDREZKA',
         description: 'Просмотр фильмов и сериалов с HDREZKA по личному аккаунту',
         component: 'rezka_online'
@@ -43,6 +43,25 @@
 
     // Интервал авто-перелога (3 дня в миллисекундах)
     var RELOGIN_INTERVAL_MS = 3 * 24 * 60 * 60 * 1000;
+
+    /* v1.0.65: VPS-прокси для обхода CDN-троттлинга из ЮВА.
+       Это reverse-proxy (nginx) на VPS в Финляндии, который проксирует
+       весь трафик rezka.fi через себя — главную, поиск, ajax, login и видео.
+       Cookies прицепляются к VPS-домену (proxy_cookie_domain) — поэтому
+       Worker для логина больше не нужен.
+       Если домен совпадает с этим — отключаем CDN race (бессмысленно). */
+    var VPS_PROXY_DOMAINS = [
+        'https://83-147-216-95.sslip.io:8443',
+        'http://83-147-216-95.sslip.io:8443'
+    ];
+    function isVpsProxyDomain(d) {
+        if (!d) return false;
+        d = String(d).toLowerCase().replace(/\/+$/, '');
+        for (var i = 0; i < VPS_PROXY_DOMAINS.length; i++) {
+            if (d === VPS_PROXY_DOMAINS[i]) return true;
+        }
+        return false;
+    }
 
     /* v1.0.32: per-film хранилище качества и сезона.
        filmId — это object.movie.id (TMDB id), стабильный per movie. */
@@ -84,7 +103,7 @@
        Сразу и инициализируем по умолчаниям через set(…, default), если пусто. */
     function ensureDefaults() {
         var defaults = {};
-        defaults[STORAGE.domain]   = 'https://rezka.fi';
+        defaults[STORAGE.domain]   = 'https://83-147-216-95.sslip.io:8443';
         defaults[STORAGE.login]    = '';
         defaults[STORAGE.password] = '';
         defaults[STORAGE.cookie]   = '';
@@ -105,7 +124,7 @@
      *  Helpers
      * ==================================================== */
     function getDomain() {
-        var d = String(Lampa.Storage.get(STORAGE.domain) || 'https://rezka.fi').trim();
+        var d = String(Lampa.Storage.get(STORAGE.domain) || 'https://83-147-216-95.sslip.io:8443').trim();
         if (!/^https?:\/\//i.test(d)) d = 'https://' + d;
         return d.replace(/\/+$/, '');
     }
@@ -1227,6 +1246,16 @@
             console.log('REZKA', 'mirror race finish:', reason, '->', (url || '').slice(0, 80));
         }
         try {
+            // v1.0.65: если весь трафик идёт через наш VPS-прокси — гонка бессмысленна:
+            // все mirror'ы ведут в одной и той же nginx-инстанции. Берём первый mp4.
+            if (isVpsProxyDomain(getDomain())) {
+                var firstMp4 = (mirrors || []).filter(function (u) {
+                    return u && u.indexOf(':hls:') === -1 && u.indexOf('.m3u8') === -1;
+                })[0] || fallbackUrl;
+                console.log('REZKA', 'mirror race: skip (VPS proxy mode), using', (firstMp4 || '').slice(0, 80));
+                finish(firstMp4, 'vps-proxy-mode');
+                return;
+            }
             // Оставляем только mp4-варианты (HLS всё равно не играется в Lampa).
             var candidates = (mirrors || []).filter(function (u) {
                 return u && u.indexOf(':hls:') === -1 && u.indexOf('.m3u8') === -1;
@@ -3196,8 +3225,8 @@
         // ── Домен ────────────────────────────────────────────────────
         Lampa.SettingsApi.addParam({
             component: 'rezka',
-            param: { name: STORAGE.domain, type: 'input', values: '', default: 'https://rezka.fi' },
-            field: { name: 'Домен HDREZKA', description: 'По умолчанию rezka.fi. Можно сменить на рабочее зеркало.' },
+            param: { name: STORAGE.domain, type: 'input', values: '', default: 'https://83-147-216-95.sslip.io:8443' },
+            field: { name: 'Домен HDREZKA', description: 'По умолчанию VPS-прокси (обход CDN-троттлинга). Можно ввести прямой https://rezka.fi (или другое рабочее зеркало) если прокси недоступен.' },
             onChange: function () { Lampa.Storage.set(STORAGE.status, 'guest'); }
         });
 
