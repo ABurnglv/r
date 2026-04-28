@@ -21,7 +21,7 @@
      * ==================================================== */
     var manifest = {
         type: 'video',
-        version: '1.0.53',
+        version: '1.0.54',
         name: 'HDREZKA',
         description: 'Просмотр фильмов и сериалов с HDREZKA по личному аккаунту',
         component: 'rezka_online'
@@ -321,8 +321,22 @@
                             rl_login = String(Lampa.Storage.get(STORAGE.login) || '').trim();
                             rl_pwd = String(Lampa.Storage.get(STORAGE.password) || '').trim();
                         } catch (eRl) {}
+                        // v1.0.54: рейт-лимит на reactive relogin — не чаще раза в 60 секунд.
+                        // Иначе при нерабочем verifySession (jar не сохраняет куки) каждый запрос
+                        // будет дёргать логин и мы забьём сервер и захламим логи.
+                        var _now = Date.now();
+                        var _lastTry = (window._rezkaLastReloginAt || 0);
+                        var _MIN_GAP = 60 * 1000;
+                        if (rl_login && rl_pwd && !opts._reauth_attempted && (_now - _lastTry) < _MIN_GAP) {
+                            console.log('REZKA', 'reactive relogin throttled (last ' + Math.round((_now - _lastTry)/1000) + 's ago, min ' + (_MIN_GAP/1000) + 's)');
+                            opts._reauth_attempted = true; // предотвращаем повторную попытку в этой же сессии request
+                            try { Lampa.Noty && Lampa.Noty.show && Lampa.Noty.show('HDREZKA: сессия не обновляется. Попробуйте ручной ввод cookie в настройках'); } catch (eThr) {}
+                            origError({ status: 401 }, 'relogin throttled');
+                            return;
+                        }
                         if (rl_login && rl_pwd && !opts._reauth_attempted) {
                             opts._reauth_attempted = true;
+                            window._rezkaLastReloginAt = _now;
                             console.log('REZKA', 'native 404 — attempting reactive relogin for', opts.url);
                             try { Lampa.Noty && Lampa.Noty.show && Lampa.Noty.show('HDREZKA: обновляю сессию...'); } catch (e3) {}
                             authenticate(rl_login, rl_pwd, function (ok, msg) {
@@ -489,46 +503,58 @@
         }
 
         // Verifies session by hitting the homepage and looking for an authenticated
-        // marker. If document.cookie has dle_user_id we're already done.
-        // Otherwise we hope that Android OkHttp's CookieJar carries cookies forward.
+        // marker. v1.0.54: до 3 попыток с паузой 800ms — jar OkHttp может не успеть
+        // сохранить куки между POST /ajax/login и GET /.
         function verifySession(cb) {
-            // shortcut: если Storage.cookie — реальные dle_* (не маркер), считаем верифицированным
             var ck = getCookie();
             if (ck && ck.indexOf('[android-session') !== 0 && /dle_user_id=/.test(ck)) return cb(true, 'document.cookie');
 
-            var net = new Lampa.Reguest();
-            net.timeout(10000);
-            var url = getDomain() + '/?t=' + Date.now();
-            var fn = (typeof net['native'] === 'function' &&
-                      Lampa.Platform && Lampa.Platform.is && Lampa.Platform.is('android'))
-                     ? net['native'] : net.silent;
-            fn.call(net, url, function (html) {
-                var s = String(html || '').slice(0, 30000);
-                // Признаки залогиненного пользователя:
-                //   <a href="/users/..." — ссылка на профиль
-                //   data-uid="\d+" — идентификатор юзера
-                //   <div class="b-user-section" — личный блок
-                //   /logout/ — кнопка выхода
-                // Надёжные маркеры залогиненного юзера (проверены на rezka.fi):
-                //   • /logout/ — ссылка выхода (абсолютная или относительная)
-                //   • dle_login_hash — CSRF-токен, выдаётся только авторизованным
-                //   • logout=yes — query в любой форме выхода
-                var loggedHints = /\/logout\/|dle_login_hash|logout=yes|action="logout"/i;
-                // Страница входа:
-                var loginHints = /<title>\s*Вход\s*<\/title>|id="login_name"|action="\/ajax\/login\/"/i;
-                if (loggedHints.test(s)) cb(true, 'OkHttp jar');
-                else if (loginHints.test(s)) cb(false, 'server returned login page');
-                else cb(false, 'no auth markers (' + s.length + ' bytes)');
-            }, function (xhr, st) {
-                cb(false, 'verify network error: ' + st);
-            }, false, {
-                dataType: 'text',
-                headers: {
-                    'User-Agent': 'Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36',
-                    'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8',
-                    'Accept-Language': 'ru,en;q=0.9'
-                }
-            });
+            var attempt = 0;
+            var MAX = 3;
+
+            function tryOnce() {
+                attempt++;
+                var net = new Lampa.Reguest();
+                net.timeout(10000);
+                var url = getDomain() + '/?t=' + Date.now();
+                var fn = (typeof net['native'] === 'function' &&
+                          Lampa.Platform && Lampa.Platform.is && Lampa.Platform.is('android'))
+                         ? net['native'] : net.silent;
+                fn.call(net, url, function (html) {
+                    var s = String(html || '').slice(0, 30000);
+                    var loggedHints = /\/logout\/|dle_login_hash|logout=yes|action="logout"/i;
+                    var loginHints  = /<title>\s*Вход\s*<\/title>|id="login_name"|action="\/ajax\/login\/"/i;
+                    if (loggedHints.test(s)) return cb(true, 'OkHttp jar (try ' + attempt + ')');
+                    if (loginHints.test(s)) {
+                        if (attempt < MAX) {
+                            console.log('REZKA', 'verify try ' + attempt + ' returned login page, retry in 800ms');
+                            return setTimeout(tryOnce, 800);
+                        }
+                        try { window._rezkaLastVerifyBody = s.slice(0, 500); } catch (e) {}
+                        return cb(false, 'server returned login page (after ' + attempt + ' tries)');
+                    }
+                    if (attempt < MAX) {
+                        console.log('REZKA', 'verify try ' + attempt + ' no markers (' + s.length + ' bytes), retry');
+                        return setTimeout(tryOnce, 800);
+                    }
+                    try { window._rezkaLastVerifyBody = s.slice(0, 500); } catch (e) {}
+                    cb(false, 'no auth markers (' + s.length + ' bytes, after ' + attempt + ' tries)');
+                }, function (xhr, st) {
+                    if (attempt < MAX) {
+                        console.log('REZKA', 'verify try ' + attempt + ' net error: ' + st + ', retry');
+                        return setTimeout(tryOnce, 800);
+                    }
+                    cb(false, 'verify network error: ' + st);
+                }, false, {
+                    dataType: 'text',
+                    headers: {
+                        'User-Agent': 'Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36',
+                        'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8',
+                        'Accept-Language': 'ru,en;q=0.9'
+                    }
+                });
+            }
+            tryOnce();
         }
 
         tryNext(0);
