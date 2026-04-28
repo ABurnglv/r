@@ -21,7 +21,7 @@
      * ==================================================== */
     var manifest = {
         type: 'video',
-        version: '1.0.60',
+        version: '1.0.61',
         name: 'HDREZKA',
         description: 'Просмотр фильмов и сериалов с HDREZKA по личному аккаунту',
         component: 'rezka_online'
@@ -1148,6 +1148,50 @@
      *  (первая и те, которые пользователь уже открывал). В встроенном плеере (lampa/inner)
      *  работает полный плейлист через Lampa.Player.playlist() — это основной путь.
      * ==================================================== */
+    /* ====================================================
+     *  hardKillPreviousVideo (v1.0.61)
+     *  Проблема: Lampa.Player.play(item) при повторном вызове НЕ уничтожает
+     *  старый <video>: в PlayerVideo.url() (=url$4 в lampa.app.min.js) он только убивает
+     *  hls/dash и вызывает create$8(), который делает display.append(новый video).
+     *  Старые <video> остаются в DOM и продолжают воспроизведение — отсюда
+     *  наложение дорожек при переключениях озвучки.
+     *
+     *  Этот helper принудительно глушит и удаляет ВСЕ <video> в контейнере
+     *  плеера. Делаем это ПЕРЕД Lampa.Player.play(newItem). Новый video будет
+     *  создан Lampa-ов create$8() при следующем PlayerVideo.url().
+     *
+     *  Каждый video: pause() → muted=true → src='' → load() (сброс буфера) →
+     *  remove(). Это освобождает нативный MediaPlayer и останавливает звук.
+     *
+     *  Селекторы: ищем в .player-video__video (стандартный класс Lampa)
+     *  и в контейнере плеера .player. Плюс fallback на все video в body внутри
+     *  body.player--viewing.
+     * ==================================================== */
+    function hardKillPreviousVideo() {
+        try {
+            var $videos = $('.player-video__video, .player video, body.player--viewing video');
+            if (!$videos || !$videos.length) {
+                console.log('REZKA', 'hardKillPreviousVideo: no <video> found');
+                return 0;
+            }
+            var killed = 0;
+            $videos.each(function () {
+                var v = this;
+                try { v.pause(); } catch (e) {}
+                try { v.muted = true; } catch (e) {}
+                try { v.removeAttribute('src'); v.src = ''; } catch (e) {}
+                try { v.load(); } catch (e) {}
+                try { v.parentNode && v.parentNode.removeChild(v); } catch (e) {}
+                killed++;
+            });
+            console.log('REZKA', 'hardKillPreviousVideo: killed=', killed);
+            return killed;
+        } catch (e) {
+            console.log('REZKA', 'hardKillPreviousVideo error:', e && e.message);
+            return 0;
+        }
+    }
+
     function buildTrimmedPlaylist(playlist) {
         if (!Array.isArray(playlist)) return [];
         return playlist.map(function (p) {
@@ -1476,11 +1520,10 @@
                                         _switching = true;
                                         console.log('REZKA', 'film voice change in player: idx ' + _curVoiceIdx + ' -> ' + vi + ' (' + v.name + ')');
                                         Lampa.Noty.show('HDREZKA: переключаю на «' + v.name + '»…');
-                                        // Сразу глушим звук старого потока (на случай, если новый запустится с задержкой).
-                                        try {
-                                            var $vid = $('video');
-                                            if ($vid && $vid.length) { try { $vid[0].pause(); } catch (e1) {} }
-                                        } catch (eMute) {}
+                                        // v1.0.61: принудительно убиваем все старые <video> — Lampa
+                                        // при Player.play() их НЕ удаляет (только create$8 добавляет новый).
+                                        // Без этого при повторных переключениях дорожки накладываются друг на друга.
+                                        hardKillPreviousVideo();
                                         try { state.choice.voice = vi; } catch (e) {}
                                         var newVoice = info.voice[vi];
                                         try { window._rezkaCurrentFilmId = curFilmId(); } catch (e) {}
@@ -1504,6 +1547,9 @@
                                                     newItem.voiceovers = item.voiceovers;
                                                 }
                                                 _curVoiceIdx = vi;
+                                                // v1.0.61: второй раз убиваем прямо перед play() — за время getStream
+                                                // мог возобновиться буфер или появиться новый video.
+                                                hardKillPreviousVideo();
                                                 try { Lampa.Player.play(newItem); } catch (ePlay) {
                                                     console.log('REZKA', 'Player.play error', ePlay && ePlay.message);
                                                 }
@@ -1691,11 +1737,9 @@
                                         console.log('REZKA', 'series voice change in-place: ' + _ctx.voice.name + ' -> ' + v.name + ' epIdx=' + curEpIdx);
                                         Lampa.Noty.show('HDREZKA: переключаю на «' + v.name + '»…');
 
-                                        // Сразу глушим звук старого потока, чтобы не было наложения.
-                                        try {
-                                            var $vid = $('video');
-                                            if ($vid && $vid.length) { try { $vid[0].pause(); } catch (e1) {} }
-                                        } catch (eMute) {}
+                                        // v1.0.61: жёстко убиваем все старые <video> — Lampa не делает этого при Player.play(),
+                                        // отсюда наложение дорожек при повторных переключениях.
+                                        hardKillPreviousVideo();
 
                                         try { state.choice.voice = vi; } catch (e) {}
 
@@ -1729,6 +1773,9 @@
                                                         _ctx.season = newSeason;
                                                         _ctx.items = newItems;
                                                         _ctx.curIdx = vi;
+                                                        // v1.0.61: второй раз перед play() — за время getStream/reload мог
+                                                        // возобновиться буфер или появиться новый элемент.
+                                                        hardKillPreviousVideo();
                                                         try { Lampa.Player.play(built.first); } catch (ePlay) {
                                                             console.log('REZKA', 'series Player.play error', ePlay && ePlay.message);
                                                         }
