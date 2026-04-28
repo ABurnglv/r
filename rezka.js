@@ -21,7 +21,7 @@
      * ==================================================== */
     var manifest = {
         type: 'video',
-        version: '1.0.56',
+        version: '1.0.57',
         name: 'HDREZKA',
         description: 'Просмотр фильмов и сериалов с HDREZKA по личному аккаунту',
         component: 'rezka_online'
@@ -1098,8 +1098,10 @@
                     subtitles: parseSubtitles(json.subtitle)
                 });
             } catch (e) {
-                console.log('REZKA', 'getStream parse error', e && e.message, resp);
-                err && err('Не удалось разобрать ответ');
+                // Не выводим resp третьим аргументом: если в нём есть circular refs,
+                // сам console.log/JSON.stringify может выбросить и замаскирует исходную ошибку.
+                console.log('REZKA', 'getStream parse error', e && e.message, '| stack=', e && (e.stack ? String(e.stack).slice(0, 500) : ''), '| resp_type=', typeof resp, '| resp_preview=', (typeof resp === 'string') ? String(resp).slice(0, 300) : '[object]');
+                err && err('Не удалось разобрать ответ: ' + (e && e.message ? e.message : 'неизвестная ошибка'));
             }
         }, function (xhr, msg) {
             console.log('REZKA', 'getStream network error', msg, xhr && xhr.status);
@@ -1552,7 +1554,11 @@
                         return cell;
                     });
                     var first = playlist[epIdx];
-                    first.playlist = playlist;
+                    // ВАЖНО: НЕ ставим first.playlist = playlist — это создаёт циркулярную
+                    // ссылку (playlist[epIdx] === first). Android Lampa в openPlayer() делает
+                    // JSON.stringify(data), и циркуляр приводит к "Converting circular structure
+                    // to JSON". Lampa.Player.playlist(playlist) ниже корректно прокидывает
+                    // плейлист — отдельное присваивание не нужно (Lampa сама делает trim_playlist).
 
                     // Сериал: добавляем «voiceovers» — в плеере это кнопка «Дорожки» с выбором озвучки.
                     // v1.0.53: переключение озвучки «на лету» — БЕЗ закрытия плеера, аналогично фильмам.
@@ -1664,7 +1670,9 @@
                                                             vo.selected = vo.index === vi;
                                                             vo.enabled  = vo.index === vi;
                                                         });
-                                                        built.first.playlist = built.playlist;
+                                                        // Не присваиваем built.first.playlist = built.playlist — циркуляр
+                                                        // (см. комментарий в playSeries). Lampa.Player.playlist() ниже
+                                                        // корректно подключает плейлист.
                                                         built.first.voiceovers = voiceovers;
                                                         // Обновляем контекст для следующих переключений.
                                                         _ctx.info = ni;
