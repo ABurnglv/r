@@ -21,7 +21,7 @@
      * ==================================================== */
     var manifest = {
         type: 'video',
-        version: '1.0.57',
+        version: '1.0.58',
         name: 'HDREZKA',
         description: 'Просмотр фильмов и сериалов с HDREZKA по личному аккаунту',
         component: 'rezka_online'
@@ -1119,6 +1119,35 @@
     }
 
     /* ====================================================
+     *  buildTrimmedPlaylist (v1.0.58)
+     *  Строит «плоский» клон плейлиста без циклов, функций и объёмных полей,
+     *  пригодный для JSON.stringify (Android-внешний плеер делает stringify перед
+     *  отправкой в AndroidJS.openPlayer). Поля — как в самой Lampa (trim_playlist в
+     *  торрент-плагине): title, url, timeline, thumbnail.
+     *  Дополнительно кладём season/episode — это числа, на stringify не влияют.
+     *  Для ленивых эпизодов (cell.url — функция) url проставляется в ''
+     *  (внешний плеер отфильтрует такие элементы сам). Это компромисс: во внешнем
+     *  плеере вся навигация «следующая серия» работает только для серии с уже разрешённым URL
+     *  (первая и те, которые пользователь уже открывал). В встроенном плеере (lampa/inner)
+     *  работает полный плейлист через Lampa.Player.playlist() — это основной путь.
+     * ==================================================== */
+    function buildTrimmedPlaylist(playlist) {
+        if (!Array.isArray(playlist)) return [];
+        return playlist.map(function (p) {
+            var url = '';
+            if (typeof p.url === 'string') url = p.url;
+            return {
+                title: p.title,
+                url: url,
+                timeline: p.timeline,
+                thumbnail: p.thumbnail,
+                season: p.season,
+                episode: p.episode
+            };
+        });
+    }
+
+    /* ====================================================
      *  TMDB episode names cache
      *  rezka всегда отдаёт эпизоды как "Серия N" — реальные имена
      *  доступны только через TMDB. Lampa уже передаёт TMDB id в object.movie.id.
@@ -1554,11 +1583,14 @@
                         return cell;
                     });
                     var first = playlist[epIdx];
-                    // ВАЖНО: НЕ ставим first.playlist = playlist — это создаёт циркулярную
-                    // ссылку (playlist[epIdx] === first). Android Lampa в openPlayer() делает
-                    // JSON.stringify(data), и циркуляр приводит к "Converting circular structure
-                    // to JSON". Lampa.Player.playlist(playlist) ниже корректно прокидывает
-                    // плейлист — отдельное присваивание не нужно (Lampa сама делает trim_playlist).
+                    // v1.0.58: во внешнем Android-плеере (AndroidJS.openPlayer) Lampa делает
+                    // JSON.stringify(data). Если прямо задать first.playlist = playlist —
+                    // получится циркуляр (playlist[epIdx] === first). Поэтому для data.playlist
+                    // используем trim-клон без циклов/функций — так же как сама Lampa
+                    // делает в торрент-плагине (trim_playlist). Для встроенного плеера ниже
+                    // отдельный Lampa.Player.playlist(playlist) прокидывает полный плейлист
+                    // с функциями-резолверами cell.url.
+                    first.playlist = buildTrimmedPlaylist(playlist);
 
                     // Сериал: добавляем «voiceovers» — в плеере это кнопка «Дорожки» с выбором озвучки.
                     // v1.0.53: переключение озвучки «на лету» — БЕЗ закрытия плеера, аналогично фильмам.
@@ -1670,9 +1702,9 @@
                                                             vo.selected = vo.index === vi;
                                                             vo.enabled  = vo.index === vi;
                                                         });
-                                                        // Не присваиваем built.first.playlist = built.playlist — циркуляр
-                                                        // (см. комментарий в playSeries). Lampa.Player.playlist() ниже
-                                                        // корректно подключает плейлист.
+                                                        // v1.0.58: trim-клон вместо прямой ссылки —
+                                                        // избегаем circular JSON в Android-плеере.
+                                                        built.first.playlist = buildTrimmedPlaylist(built.playlist);
                                                         built.first.voiceovers = voiceovers;
                                                         // Обновляем контекст для следующих переключений.
                                                         _ctx.info = ni;
