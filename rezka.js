@@ -21,7 +21,7 @@
      * ==================================================== */
     var manifest = {
         type: 'video',
-        version: '1.0.63',
+        version: '1.0.64',
         name: 'HDREZKA',
         description: 'Просмотр фильмов и сериалов с HDREZKA по личному аккаунту',
         component: 'rezka_online'
@@ -1196,19 +1196,25 @@
      *  body.player--viewing.
      * ==================================================== */
     /* ====================================================
-     *  pickFastestMirror (v1.0.63)
-     *  Гонка зеркал: параллельно дёргаем HEAD-запрос на каждый mp4 URL
-     *  из mirrors. Кто первый ответил 200/206 — тот и выбирается.
-     *  Кэш победителя по хосту — в window._rezkaFastestHost (живёт до перезагрузки Lampa).
-     *  При повторных вызовах: если в mirrors есть URL на кэш-хосте — возвращаем
-     *  его без гонки (экономит 100-500мс на каждой следующей серии/озвучке).
+     *  pickFastestMirror (v1.0.64)
+     *  Гонка зеркал ПО ПРОПУСКНОЙ СПОСОБНОСТИ (не по RTT).
+     *  Проблема в v1.0.63: HEAD-запрос показывает latency, но не throughput.
+     *  На практике CDN может быть «быстрым» на пинг (100мс), но отдавать
+     *  видео со скоростью 3 Mbps (буферит 1080p) — тогда как «медленный» по пингу
+     *  (300мс) реально даёт 50 Mbps.
      *
-     *  Таймаут гонки: 1500мс. Если никто не успел — фолбэк на fallbackUrl
-     *  (это последний mp4, как было в v1.0.60).
+     *  Новый подход:
+     *  - GET с Range: bytes=0-262143 (256 KB) на каждое зеркало параллельно.
+     *  - Дожидаемся response.arrayBuffer() — это замеряет время до получения
+     *    всех 256 KB.
+     *  - Победитель — первый, кто скачал 256 KB целиком.
+     *  - Бонус: 256 KB — это moov atom mp4 в начале файла. Плеер всё равно
+     *    это скачивает при старте — эта работа не пропадает впустую (хотя
+     *    браузер и не кэширует cache:'no-store', но CDN edge прогревается).
      *
-     *  Используем fetch с method:'HEAD'. CORS не мешает — нам нужен только факт
-     *  быстрого ответа (network response timing). Даже при опаковке opaque-респонса
-     *  fetch исполнится, и мы поймём время.
+     *  Таймаут гонки: 2500мс (256 KB на 1 Mbps = 2 сек; хуже будет буферить).
+     *  Кэш в window._rezkaFastestHost — после первого выбора следующие серии
+     *  берут без ре-гонки. Сбрасывается при player error.
      *
      *  cb(winnerUrl) — вызывается ровно один раз.
      * ==================================================== */
@@ -1218,7 +1224,7 @@
             if (done) return;
             done = true;
             try { cb(url); } catch (e) {}
-            console.log('REZKA', 'mirror race finish:', reason, '->', (url || '').slice(0, 60));
+            console.log('REZKA', 'mirror race finish:', reason, '->', (url || '').slice(0, 80));
         }
         try {
             // Оставляем только mp4-варианты (HLS всё равно не играется в Lampa).
@@ -1243,45 +1249,79 @@
                 console.log('REZKA', 'mirror race: cached host', cachedHost, 'not in candidates');
             }
 
-            // Параллельные HEAD-запросы. Первый, кто ответил — победитель.
-            var TIMEOUT_MS = 1500;
-            var startTs = Date.now();
-            console.log('REZKA', 'mirror race: starting with', candidates.length, 'candidates');
+            // Параллельные GET-Range запросы. Первый, кто скачал 256 KB — победитель.
+            var TIMEOUT_MS = 2500;
+            var CHUNK_BYTES = 262143; // 256 KB - 1
+            console.log('REZKA', 'mirror race (throughput): starting with', candidates.length, 'candidates, chunk=256KB, timeout=' + TIMEOUT_MS + 'ms');
 
-            // Таймаут — фолбэк на последний mp4 (так же как в v1.0.60).
+            // Статистика для фолбэка по таймауту: если кто-то скачал хотя бы частью —
+            // выберем его при таймауте (битых самых).
+            var partialBytes = candidates.map(function () { return 0; });
+            var partialAbort = candidates.map(function () { return null; });
+
+            // Таймаут — фолбэк на лидера по байтам (кто больше успел скачать) или fallbackUrl.
             setTimeout(function () {
-                if (!done) {
-                    console.log('REZKA', 'mirror race: timeout after', TIMEOUT_MS, 'ms');
-                    finish(fallbackUrl || candidates[candidates.length - 1], 'timeout');
+                if (done) return;
+                // Находим лидера по частичным байтам.
+                var bestIdx = -1, bestBytes = 0;
+                for (var k = 0; k < partialBytes.length; k++) {
+                    if (partialBytes[k] > bestBytes) { bestBytes = partialBytes[k]; bestIdx = k; }
                 }
+                if (bestIdx >= 0 && bestBytes > 8192) {
+                    // Хоть кто-то начал качать — выбираем его.
+                    var winUrl = candidates[bestIdx];
+                    try {
+                        var wh = new URL(winUrl).hostname;
+                        if (wh) window._rezkaFastestHost = wh;
+                        console.log('REZKA', 'mirror race: timeout-leader idx=' + bestIdx, 'host=', wh, 'bytes=', bestBytes);
+                    } catch (eX) {}
+                    finish(winUrl, 'timeout-leader:idx' + bestIdx + ':' + bestBytes + 'b');
+                } else {
+                    console.log('REZKA', 'mirror race: timeout, no progress, fallback');
+                    finish(fallbackUrl || candidates[candidates.length - 1], 'timeout-no-progress');
+                }
+                // Обрываем все оставшиеся fetch — они нам больше не нужны.
+                partialAbort.forEach(function (a) { try { a && a.abort(); } catch (eA) {} });
             }, TIMEOUT_MS);
 
             candidates.forEach(function (url, idx) {
                 var t0 = Date.now();
-                // mode:'no-cors' — CDN обычно не отдаёт CORS заголовки. Нам важно
-                // только время ответа, не тело.
+                var ctrl = null;
+                try { ctrl = (typeof AbortController !== 'undefined') ? new AbortController() : null; } catch (eAC) {}
+                partialAbort[idx] = ctrl;
                 try {
-                    fetch(url, { method: 'HEAD', mode: 'no-cors', cache: 'no-store' })
-                        .then(function () {
+                    fetch(url, {
+                        method: 'GET',
+                        headers: { 'Range': 'bytes=0-' + CHUNK_BYTES },
+                        cache: 'no-store',
+                        signal: ctrl ? ctrl.signal : undefined
+                        // НЕ ставим mode:'no-cors' — нам нужен доступ к body. CDN может
+                        // не отдавать CORS-заголовки — тогда fetch бросит ошибку. Но
+                        // на Lampa Android (Chromium WebView) CORS для WebView-окна часто
+                        // отключён — тогда работает. Иначе получим фолбэк по таймауту.
+                    })
+                    .then(function (resp) {
+                        if (done) return null;
+                        // Пытаемся прочитать всё тело — это и есть замер throughput.
+                        return resp.arrayBuffer().then(function (buf) {
                             if (done) return;
                             var dt = Date.now() - t0;
-                            // Пытаемся вытащить хост из url и запомнить на сессию.
+                            var bytes = buf ? buf.byteLength : 0;
+                            partialBytes[idx] = bytes;
+                            var mbps = (bytes * 8 / 1024 / 1024) / (dt / 1000);
                             try {
-                                var winHost = '';
-                                try { winHost = new URL(url).hostname; } catch (eU) {
-                                    var hm = url.match(/^https?:\/\/([^\/]+)/);
-                                    winHost = hm ? hm[1] : '';
-                                }
+                                var winHost = new URL(url).hostname;
                                 if (winHost) { window._rezkaFastestHost = winHost; }
-                                console.log('REZKA', 'mirror race: winner idx=' + idx, 'host=', winHost, 'rtt=', dt + 'ms');
+                                console.log('REZKA', 'mirror race: winner idx=' + idx, 'host=', winHost, 'bytes=', bytes, 'time=' + dt + 'ms', 'speed=' + mbps.toFixed(1) + 'Mbps');
                             } catch (eL) {}
-                            finish(url, 'race-winner:idx' + idx + ':' + dt + 'ms');
-                        })
-                        .catch(function (e) {
-                            // Игнорируем отдельные ошибки — надеёмся, что хотя бы один ответит.
-                            // Если все рухнут — сработает таймаут выше.
-                            console.log('REZKA', 'mirror race: candidate', idx, 'failed:', e && e.message);
+                            finish(url, 'race-winner:idx' + idx + ':' + dt + 'ms:' + mbps.toFixed(1) + 'Mbps');
                         });
+                    })
+                    .catch(function (e) {
+                        // AbortError — это норма, мы сами оборвали победителя.
+                        if (e && e.name === 'AbortError') return;
+                        console.log('REZKA', 'mirror race: candidate', idx, 'failed:', e && e.message);
+                    });
                 } catch (eFetch) {
                     console.log('REZKA', 'mirror race: fetch threw for', idx, eFetch && eFetch.message);
                 }
@@ -3474,6 +3514,9 @@
             addCardButton();
             registerGlobalQualityListener();
             registerMirrorErrorListener();
+            // v1.0.64: при загрузке новой версии плагина сбрасываем кэш быстрого хоста,
+            // чтобы новый алгоритм гонки (throughput вместо RTT) перевыбрал по своим правилам.
+            try { window._rezkaFastestHost = ''; console.log('REZKA', 'fastest host cache cleared on plugin start (v1.0.64)'); } catch (eClr) {}
             // Авто-перелог: проверяем при старте и каждые 6 часов.
             setTimeout(maybeAutoRelogin, 5000);
             setInterval(maybeAutoRelogin, 6 * 60 * 60 * 1000);
