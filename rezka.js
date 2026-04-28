@@ -21,7 +21,7 @@
      * ==================================================== */
     var manifest = {
         type: 'video',
-        version: '1.0.70',
+        version: '1.0.71',
         name: 'HDREZKA',
         description: 'Просмотр фильмов и сериалов с HDREZKA по личному аккаунту',
         component: 'rezka_online'
@@ -1177,7 +1177,11 @@
                     if (/^2K\b/i.test(s)) return s.replace(/^2K\b/i, '1440p');
                     return s;
                 }
-                sortedItems.forEach(function (it) { qualities[normalizeQualityLabel(it.label)] = it.file; });
+                // v1.0.71: ПЕРЕПИСЫВАЕМ КАЖДЫЙ url качества через наш VPS-прокси.
+                // Без этого Lampa.Player брал URL из quality-map (прямые CDN-ссылки) и
+                // ходил в обход нашего file: winnerUrl. Результат — 0 запросов на /cdn/
+                // в логах nginx, но видео всё равно воспроизводилось напрямую с CDN.
+                sortedItems.forEach(function (it) { qualities[normalizeQualityLabel(it.label)] = rewriteCdnViaProxy(it.file); });
                 // Сохраняем фактические лейблы этого фильма для перестроения sort-меню в buildFilter()
                 try {
                     var labels = sortedItems.map(function (it) { return normalizeQualityLabel(it.label); });
@@ -1237,9 +1241,17 @@
                 // Кэш победителя в window._rezkaFastestHost — после первого выбора
                 // следующие вызовы (смена серии/озвучки) берут URL без ре-гонки.
                 pickFastestMirror(picked.mirrors || [picked.file], picked.file, function (winnerUrl) {
+                    // v1.0.71: гарантируем что file тоже переписан (winnerUrl уже приходит
+                    // переписанным из pickFastestMirror, но fallback picked.file из items[] — нет).
+                    var finalFile = rewriteCdnViaProxy(winnerUrl || picked.file);
+                    console.log('REZKA', 'getStream final file=', (finalFile || '').slice(0, 90),
+                        'quality keys=', Object.keys(qualities).join('|'),
+                        'all quality URLs rewritten=', Object.keys(qualities).every(function(k){
+                            return /83-147-216-95\.sslip\.io:8080\/cdn\//.test(qualities[k]);
+                        }));
                     cb({
                         title: '',
-                        file: winnerUrl || picked.file,
+                        file: finalFile,
                         quality: qualities,
                         chosenQuality: picked.label,
                         subtitles: parseSubtitles(json.subtitle)
