@@ -21,7 +21,7 @@
      * ==================================================== */
     var manifest = {
         type: 'video',
-        version: '1.0.66',
+        version: '1.0.67',
         name: 'HDREZKA',
         description: 'Просмотр фильмов и сериалов с HDREZKA по личному аккаунту',
         component: 'rezka_online'
@@ -457,6 +457,40 @@
                    '&login_not_save=0';
 
         var userProxy = String(Lampa.Storage.get(STORAGE.proxy) || '').trim();
+
+        // v1.0.67: если домен — VPS-прокси, у нас есть локальный /__rezka_login,
+        // который POSTит на rezka со стороны сервера и возвращает cookies в JSON.
+        // Это лучший путь для Android: получаем dle_* строкой и сохраняем в Storage.
+        var curDomain = getDomain();
+        if (isVpsProxyDomain(curDomain)) {
+            var vpsLoginUrl = curDomain.replace(/\/+$/, '') + '/__rezka_login';
+            console.log('REZKA', 'v1.0.67: login via VPS proxy', vpsLoginUrl);
+            var netV = new Lampa.Reguest();
+            netV.timeout(25000);
+            var fnV = (typeof netV['native'] === 'function') ? netV['native'] : netV.silent;
+            fnV.call(netV, vpsLoginUrl, function (resp) {
+                var jr = null;
+                try { jr = (typeof resp === 'object' && resp !== null) ? resp : JSON.parse(String(resp)); } catch (e) {}
+                if (jr && jr.ok && jr.cookie && /dle_user_id=/.test(jr.cookie) && /dle_password=/.test(jr.cookie)) {
+                    console.log('REZKA', 'VPS-proxy login OK, cookie length=', jr.cookie.length, 'verified=', !!jr.verified);
+                    Lampa.Storage.set(STORAGE.cookie, jr.cookie);
+                    Lampa.Storage.set(STORAGE.status, 'logged');
+                    Lampa.Storage.set(STORAGE.loginTs, Date.now());
+                    return done(true, 'Вход через VPS-прокси успешен (' + jr.cookie.length + ' байт' + (jr.verified ? ', верифицирован' : '') + ')');
+                }
+                var verr = (jr && jr.error) || 'unknown';
+                console.log('REZKA', 'VPS-proxy login failed:', verr, '— fallback to direct');
+                Lampa.Noty.show('VPS-прокси: ' + verr + ' — пробую прямой вход');
+                tryDirect();
+            }, function (xhr, st) {
+                console.log('REZKA', 'VPS-proxy login network error:', st, '— fallback to direct');
+                tryDirect();
+            }, JSON.stringify({ login: login, password: password, domain: 'https://rezka.fi' }), {
+                dataType: 'json',
+                headers: { 'Content-Type': 'application/json' }
+            });
+            return;
+        }
 
         // v1.0.55: если пользователь настроил HDREZKA-worker (Cloudflare) — первым делом
         // пробуем выполнить логин через него. Worker делает POST /ajax/login/ на
