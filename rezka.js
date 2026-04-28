@@ -21,7 +21,7 @@
      * ==================================================== */
     var manifest = {
         type: 'video',
-        version: '1.0.54',
+        version: '1.0.55',
         name: 'HDREZKA',
         description: 'Просмотр фильмов и сериалов с HDREZKA по личному аккаунту',
         component: 'rezka_online'
@@ -401,6 +401,55 @@
                    '&login_not_save=0';
 
         var userProxy = String(Lampa.Storage.get(STORAGE.proxy) || '').trim();
+
+        // v1.0.55: если пользователь настроил HDREZKA-worker (Cloudflare) — первым делом
+        // пробуем выполнить логин через него. Worker делает POST /ajax/login/ на
+        // своей стороне и возвращает cookies строкой — это решает проблему HttpOnly куков
+        // на Android, где OkHttp jar их не передаёт между запросами.
+        if (userProxy) {
+            // Автодетект: если это workers.dev или явно отмечен как worker-style.
+            var looksLikeWorker = /workers\.dev|\.vercel\.app|\.fly\.dev|\.onrender\.com/i.test(userProxy)
+                                  || /^worker:/i.test(userProxy);
+            if (looksLikeWorker) {
+                var workerBase = userProxy.replace(/^worker:/i, '').replace(/\/+$/, '');
+                var workerLoginUrl = workerBase + '/login';
+                console.log('REZKA', 'worker login attempt via', workerLoginUrl);
+                var net0 = new Lampa.Reguest();
+                net0.timeout(20000);
+                var fn0 = (typeof net0['native'] === 'function') ? net0['native'] : net0.silent;
+                fn0.call(net0, workerLoginUrl, function (resp) {
+                    var jr = null;
+                    try { jr = (typeof resp === 'object' && resp !== null) ? resp : JSON.parse(String(resp)); } catch (e) {}
+                    if (jr && jr.ok && jr.cookie && /dle_user_id=/.test(jr.cookie) && /dle_password=/.test(jr.cookie)) {
+                        console.log('REZKA', 'worker login OK, cookie length=', jr.cookie.length, 'verified=', !!jr.verified);
+                        Lampa.Storage.set(STORAGE.cookie, jr.cookie);
+                        Lampa.Storage.set(STORAGE.status, 'logged');
+                        Lampa.Storage.set(STORAGE.loginTs, Date.now());
+                        if (jr.domain) {
+                            try {
+                                var curDom = (Lampa.Storage.get(STORAGE.domain) || '').toString();
+                                if (!curDom) Lampa.Storage.set(STORAGE.domain, jr.domain);
+                            } catch (eDom) {}
+                        }
+                        return done(true, 'Вход через worker успешен (' + jr.cookie.length + ' байт cookies' + (jr.verified ? ', верифицирован' : '') + ')');
+                    }
+                    var werr = (jr && jr.error) || 'unknown';
+                    console.log('REZKA', 'worker login failed:', werr, '— fallback to direct login');
+                    Lampa.Noty.show('HDREZKA worker: ' + werr + ' — пробую прямой вход');
+                    tryDirect();
+                }, function (xhr, st) {
+                    console.log('REZKA', 'worker login network error:', st, '— fallback to direct login');
+                    tryDirect();
+                }, JSON.stringify({ login: login, password: password, domain: getDomain() }), {
+                    dataType: 'json',
+                    headers: { 'Content-Type': 'application/json' }
+                });
+                return;
+            }
+        }
+        tryDirect();
+
+        function tryDirect() {
         // Попытки: 1) прямой, 2) пользовательский прокси (если есть)
         var attempts = [''];
         if (userProxy) {
@@ -558,6 +607,7 @@
         }
 
         tryNext(0);
+        } // end tryDirect
     }
 
     /**
@@ -2986,7 +3036,7 @@
             param: { name: STORAGE.proxy, type: 'input', values: '', default: '' },
             field: {
                 name: 'CORS-прокси (опц.)',
-                description: 'Если HDREZKA блокируется CORS, можно указать прокси, например https://your-proxy.com/'
+                description: 'Для входа по логину/паролю на Android нужен HDREZKA-worker (Cloudflare Workers). Инструкция: https://github.com/ABurnglv/r/tree/main/cf-worker. Вставьте сюда URL воркера, например https://rezka-proxy.<account>.workers.dev'
             }
         });
 
