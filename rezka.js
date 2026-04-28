@@ -21,7 +21,7 @@
      * ==================================================== */
     var manifest = {
         type: 'video',
-        version: '1.0.69',
+        version: '1.0.70',
         name: 'HDREZKA',
         description: 'Просмотр фильмов и сериалов с HDREZKA по личному аккаунту',
         component: 'rezka_online'
@@ -75,9 +75,16 @@
         return false;
     }
 
-    /* v1.0.68: Переписывает прямую CDN-ссылку (https://laptostack.org/.../v.mp4)
-       на проксированный URL VPS: https://<vps>:8443/cdn/laptostack.org/.../v.mp4.
-       Используется только когда домен плагина — VPS-прокси. */
+    /* v1.0.70: Переписываем прямую CDN-ссылку на наш VPS, но обязательно
+       по HTTP на порт 8080 (специальный CDN-listener). Причина:
+       - Нативный медиаплеер Android (ExoPlayer/MediaPlayer) на TV-сборках
+         НЕ доверяет цепочке Let's Encrypt ECDSA (E7) — TLS handshake до
+         <vps>:8443 заканчивается RST/Alert. WebView ходит, плеер — нет.
+       - mp4 у самого CDN не зашифрован: TLS на отрезке VPS↔TV ничего не защищает.
+       - Поэтому видео-эндпоинт на VPS поднят чистым HTTP на 8080,
+         от VPS к origin CDN всё равно идёт TLS.
+       Вход всё ещё через HTTPS:8443 — куки/HTML/JSON не меняем. */
+    var VPS_CDN_HTTP_BASE = 'http://83-147-216-95.sslip.io:8080';
     function rewriteCdnViaProxy(url) {
         if (!url) return url;
         var dom = getDomain();
@@ -89,12 +96,14 @@
             var path = m[3] || '/';
             // Если уже переписанный (во избежание двойного оборачивания).
             if (host === dom.replace(/^https?:\/\//, '').replace(/:\d+$/, '').toLowerCase()) return url;
+            // Уже наш CDN-хост:порт?
+            if (url.indexOf(VPS_CDN_HTTP_BASE + '/cdn/') === 0) return url;
             if (!isAllowedCdnHost(host)) {
                 console.log('REZKA', 'CDN rewrite skipped, host not whitelisted:', host);
                 return url;
             }
-            // Сформировать URL прокси: <vps>/cdn/<host><path>
-            return dom.replace(/\/+$/, '') + '/cdn/' + host + path;
+            // Видео всегда уходит на HTTP:8080 — обходим TLS native player issue.
+            return VPS_CDN_HTTP_BASE + '/cdn/' + host + path;
         } catch (e) {
             console.log('REZKA', 'rewriteCdnViaProxy error:', e && e.message);
             return url;
