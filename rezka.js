@@ -21,7 +21,7 @@
      * ==================================================== */
     var manifest = {
         type: 'video',
-        version: '1.0.61',
+        version: '1.0.62',
         name: 'HDREZKA',
         description: 'Просмотр фильмов и сериалов с HDREZKA по личному аккаунту',
         component: 'rezka_online'
@@ -1105,6 +1105,29 @@
                 }
                 var _isHls = ((picked.file || '').indexOf(':hls:') !== -1) || ((picked.file || '').indexOf('.m3u8') !== -1);
                 console.log('REZKA', 'getStream picked', picked && picked.label, 'pref=', qPref, 'available=', Object.keys(qualities).join('/'), 'voice=', voice && voice.name, 'tid=', voice && voice.id, 'mirrors=', (picked.mirrors && picked.mirrors.length) || 1, 'fmt=', _isHls ? 'HLS' : 'MP4', 'urlHash=', (picked.file || '').slice(-40));
+                // v1.0.62: диагностика «зеркал» — печатаем сокращённо каждый URL из picked.mirrors,
+                // чтобы видеть domain/path варианты. Сравниваем хосты и предпоследние
+                // цифры пути (предположительный номер CDN-узла).
+                try {
+                    if (picked.mirrors && picked.mirrors.length) {
+                        picked.mirrors.forEach(function (mu, mi) {
+                            var host = '';
+                            var pathTail = '';
+                            try {
+                                var u = new URL(mu);
+                                host = u.hostname;
+                                pathTail = u.pathname.split('/').slice(-3).join('/');
+                            } catch (eUrl) {
+                                // фолбэк без URL parser
+                                var hm = mu.match(/^https?:\/\/([^\/]+)/);
+                                host = hm ? hm[1] : '?';
+                                pathTail = mu.slice(-50);
+                            }
+                            var isHls = (mu.indexOf(':hls:') !== -1) || (mu.indexOf('.m3u8') !== -1);
+                            console.log('REZKA', 'mirror[' + mi + ']', isHls ? 'HLS' : 'MP4', 'host=', host, 'tail=...' + pathTail);
+                        });
+                    }
+                } catch (eDbg) {}
                 // Сообщаем в компонент (если подписан) — он перестроит sort-меню
                 try { Lampa.Listener.send('rezka_quality', { type: 'available', labels: sortedItems.map(function(i){return i.label;}) }); } catch(e) {}
                 cb({
