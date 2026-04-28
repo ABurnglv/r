@@ -21,7 +21,7 @@
      * ==================================================== */
     var manifest = {
         type: 'video',
-        version: '1.0.59',
+        version: '1.0.60',
         name: 'HDREZKA',
         description: 'Просмотр фильмов и сериалов с HDREZKA по личному аккаунту',
         component: 'rezka_online'
@@ -223,14 +223,25 @@
             var m = part.match(/\[([^\]]+)\](.+)/);
             if (!m) return;
             var label = m[1].trim();
-            // Формат rezka: "[1080p]url1 or url2 or url3" — это зеркала CDN для одного и того же
-            // качества. Сама rezka.fi в браузере пробует ПЕРВОЕ зеркало — это основной
-            // CDN, он почти всегда быстрее остальных (остальные — fallback). v1.0.59:
-            // берём ПЕРВОЕ зеркало (раньше брали последнее — это была главная причина
-            // буферизации на ТВ в высоком качестве).
+            // Формат rezka: "[1080p Ultra]url1:hls:manifest.m3u8 or url2.mp4".
+            // НЕ зеркала — это разные форматы доставки одного и того же видео:
+            //   - HLS-вариант (.../m.mp4:hls:manifest.m3u8) — для веб-плеера rezka.fi,
+            //     требует cookie/Referer при запросе фрагментов, поэтому в Lampa HLS.js
+            //     выдаёт fragLoadError (не добрасывает наши cookies).
+            //   - Прямой mp4 (.../m.mp4) — работает в любом плеере без cookies
+            //     (signed URL).
+            // Требование: ПРЕДПОЧИТАЕМ MP4 вариант. Он обычно последний в списке ' or '.
+            // v1.0.60: явный выбор по маске, фолбэк на последний URL.
             var urls = m[2].split(' or ').map(function (s) { return s.trim(); }).filter(Boolean);
             if (!urls.length) return;
-            var file = urls[0];
+            // Приоритет 1: URL без «:hls:» и без «.m3u8» — это прямой mp4.
+            var mp4 = null;
+            for (var i = urls.length - 1; i >= 0; i--) {
+                var u = urls[i];
+                if (u.indexOf(':hls:') === -1 && u.indexOf('.m3u8') === -1) { mp4 = u; break; }
+            }
+            // Фолбэк: последний URL (исторически работающий выбор).
+            var file = mp4 || urls[urls.length - 1];
             result.push({ label: label, file: file, mirrors: urls });
         });
         return result;
@@ -1092,7 +1103,8 @@
                         if (best) picked = best;
                     }
                 }
-                console.log('REZKA', 'getStream picked', picked && picked.label, 'pref=', qPref, 'available=', Object.keys(qualities).join('/'), 'voice=', voice && voice.name, 'tid=', voice && voice.id, 'mirrors=', (picked.mirrors && picked.mirrors.length) || 1, 'urlHash=', (picked.file || '').slice(-40));
+                var _isHls = ((picked.file || '').indexOf(':hls:') !== -1) || ((picked.file || '').indexOf('.m3u8') !== -1);
+                console.log('REZKA', 'getStream picked', picked && picked.label, 'pref=', qPref, 'available=', Object.keys(qualities).join('/'), 'voice=', voice && voice.name, 'tid=', voice && voice.id, 'mirrors=', (picked.mirrors && picked.mirrors.length) || 1, 'fmt=', _isHls ? 'HLS' : 'MP4', 'urlHash=', (picked.file || '').slice(-40));
                 // Сообщаем в компонент (если подписан) — он перестроит sort-меню
                 try { Lampa.Listener.send('rezka_quality', { type: 'available', labels: sortedItems.map(function(i){return i.label;}) }); } catch(e) {}
                 cb({
