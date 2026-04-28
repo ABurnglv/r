@@ -21,7 +21,7 @@
      * ==================================================== */
     var manifest = {
         type: 'video',
-        version: '1.0.65',
+        version: '1.0.66',
         name: 'HDREZKA',
         description: 'Просмотр фильмов и сериалов с HDREZKA по личному аккаунту',
         component: 'rezka_online'
@@ -162,7 +162,18 @@
         var ck = getCookie();
         // Не отправляем маркер [android-session:...] в Cookie — это не реальные cookies, а признак что логин
         // был выполнен и cookies лежат в OkHttp jar; native-стек Lampa сам подставит их.
-        if (ck && ck.indexOf('[android-session') !== 0) headers['Cookie'] = ck;
+        if (ck && ck.indexOf('[android-session') !== 0) {
+            headers['Cookie'] = ck;
+            // v1.0.66: Lampa Android native HTTP-стек (OkHttp) ВЫРЕЗАЕТ заголовок Cookie
+            // (считает его forbidden), поэтому через `Cookie:` cookie не доходит до прокси.
+            // Дублируем cookie в нестандартный заголовок X-Rezka-Cookie — наш VPS-nginx
+            // через map($http_x_rezka_cookie ...) переписывает его обратно в Cookie:
+            // для upstream rezka.fi. На worker'e и сторонних прокси этот заголовок просто
+            // игнорируется. Так логин работает и на TV.
+            if (isVpsProxyDomain(getDomain())) {
+                headers['X-Rezka-Cookie'] = ck;
+            }
+        }
         if (extra) for (var k in extra) headers[k] = extra[k];
         return headers;
     }
@@ -287,6 +298,7 @@
             if (lk === 'cookie' || lk === 'referer' || lk === 'user-agent' || lk === 'host') continue;
             safeHeaders[k] = headers[k];
         }
+        // X-Rezka-Cookie оставляем — это нестандартный, браузер его не блокирует.
 
         var params = {
             dataType: opts.dataType || 'text',
