@@ -21,7 +21,7 @@
      * ==================================================== */
     var manifest = {
         type: 'video',
-        version: '1.0.68',
+        version: '1.0.69',
         name: 'HDREZKA',
         description: 'Просмотр фильмов и сериалов с HDREZKA по личному аккаунту',
         component: 'rezka_online'
@@ -496,39 +496,10 @@
 
         var userProxy = String(Lampa.Storage.get(STORAGE.proxy) || '').trim();
 
-        // v1.0.67: если домен — VPS-прокси, у нас есть локальный /__rezka_login,
-        // который POSTит на rezka со стороны сервера и возвращает cookies в JSON.
-        // Это лучший путь для Android: получаем dle_* строкой и сохраняем в Storage.
-        var curDomain = getDomain();
-        if (isVpsProxyDomain(curDomain)) {
-            var vpsLoginUrl = curDomain.replace(/\/+$/, '') + '/__rezka_login';
-            console.log('REZKA', 'v1.0.67: login via VPS proxy', vpsLoginUrl);
-            var netV = new Lampa.Reguest();
-            netV.timeout(25000);
-            var fnV = (typeof netV['native'] === 'function') ? netV['native'] : netV.silent;
-            fnV.call(netV, vpsLoginUrl, function (resp) {
-                var jr = null;
-                try { jr = (typeof resp === 'object' && resp !== null) ? resp : JSON.parse(String(resp)); } catch (e) {}
-                if (jr && jr.ok && jr.cookie && /dle_user_id=/.test(jr.cookie) && /dle_password=/.test(jr.cookie)) {
-                    console.log('REZKA', 'VPS-proxy login OK, cookie length=', jr.cookie.length, 'verified=', !!jr.verified);
-                    Lampa.Storage.set(STORAGE.cookie, jr.cookie);
-                    Lampa.Storage.set(STORAGE.status, 'logged');
-                    Lampa.Storage.set(STORAGE.loginTs, Date.now());
-                    return done(true, 'Вход через VPS-прокси успешен (' + jr.cookie.length + ' байт' + (jr.verified ? ', верифицирован' : '') + ')');
-                }
-                var verr = (jr && jr.error) || 'unknown';
-                console.log('REZKA', 'VPS-proxy login failed:', verr, '— fallback to direct');
-                Lampa.Noty.show('VPS-прокси: ' + verr + ' — пробую прямой вход');
-                tryDirect();
-            }, function (xhr, st) {
-                console.log('REZKA', 'VPS-proxy login network error:', st, '— fallback to direct');
-                tryDirect();
-            }, JSON.stringify({ login: login, password: password, domain: 'https://rezka.fi' }), {
-                dataType: 'json',
-                headers: { 'Content-Type': 'application/json' }
-            });
-            return;
-        }
+        // v1.0.69: НА VPS-прокси эндпоинт /ajax/login/ полностью имитирует rezka,
+        // но ДОПОЛНИТЕЛЬНО возвращает cookies в теле ответа (поля cookie/dle_user_id/dle_password).
+        // Это решает Android-OkHttp HttpOnly-проблему без отдельного эндпоинта.
+        // См. handleResponse() ниже — он сначала смотрит json.cookie, потом document.cookie.
 
         // v1.0.55: если пользователь настроил HDREZKA-worker (Cloudflare) — первым делом
         // пробуем выполнить логин через него. Worker делает POST /ajax/login/ на
@@ -633,6 +604,26 @@
             }
 
             if (ok) {
+                // v1.0.69: ПРИОРИТЕТ 1 — если JSON-ответ содержит поле cookie (формат mimic
+                // от нашего VPS-прокси) — берём сразу. Это обходит Android-OkHttp HttpOnly-проблему.
+                var injectedCookie = '';
+                try {
+                    if (json && typeof json.cookie === 'string'
+                        && /dle_user_id=/.test(json.cookie)
+                        && /dle_password=/.test(json.cookie)) {
+                        injectedCookie = json.cookie;
+                    }
+                } catch (eInj) {}
+                if (injectedCookie) {
+                    console.log('REZKA', 'login OK; cookies in JSON body, len=', injectedCookie.length,
+                        'verified=', !!(json && json.verified));
+                    Lampa.Storage.set(STORAGE.cookie, injectedCookie);
+                    Lampa.Storage.set(STORAGE.status, 'logged');
+                    Lampa.Storage.set(STORAGE.loginTs, Date.now());
+                    return done(true, 'Вход успешен (' + injectedCookie.length + ' байт cookies'
+                        + ((json && json.verified) ? ', верифицирован' : '') + ')');
+                }
+
                 // 1) Пробуем достать cookies из document.cookie (веб-версия Lampa).
                 //    На Android этого не будет — dle_* идут с флагом HttpOnly,
                 //    они ложатся в OkHttp CookieJar и невидимы для JS.
