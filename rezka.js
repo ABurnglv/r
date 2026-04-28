@@ -21,7 +21,7 @@
      * ==================================================== */
     var manifest = {
         type: 'video',
-        version: '1.0.62',
+        version: '1.0.63',
         name: 'HDREZKA',
         description: 'Просмотр фильмов и сериалов с HDREZKA по личному аккаунту',
         component: 'rezka_online'
@@ -1130,12 +1130,17 @@
                 } catch (eDbg) {}
                 // Сообщаем в компонент (если подписан) — он перестроит sort-меню
                 try { Lampa.Listener.send('rezka_quality', { type: 'available', labels: sortedItems.map(function(i){return i.label;}) }); } catch(e) {}
-                cb({
-                    title: '',
-                    file: picked.file,
-                    quality: qualities,
-                    chosenQuality: picked.label,
-                    subtitles: parseSubtitles(json.subtitle)
+                // v1.0.63: гонка зеркал CDN — выбираем быстрейший mp4 хост для текущей сети.
+                // Кэш победителя в window._rezkaFastestHost — после первого выбора
+                // следующие вызовы (смена серии/озвучки) берут URL без ре-гонки.
+                pickFastestMirror(picked.mirrors || [picked.file], picked.file, function (winnerUrl) {
+                    cb({
+                        title: '',
+                        file: winnerUrl || picked.file,
+                        quality: qualities,
+                        chosenQuality: picked.label,
+                        subtitles: parseSubtitles(json.subtitle)
+                    });
                 });
             } catch (e) {
                 // Не выводим resp третьим аргументом: если в нём есть circular refs,
@@ -1190,6 +1195,103 @@
      *  и в контейнере плеера .player. Плюс fallback на все video в body внутри
      *  body.player--viewing.
      * ==================================================== */
+    /* ====================================================
+     *  pickFastestMirror (v1.0.63)
+     *  Гонка зеркал: параллельно дёргаем HEAD-запрос на каждый mp4 URL
+     *  из mirrors. Кто первый ответил 200/206 — тот и выбирается.
+     *  Кэш победителя по хосту — в window._rezkaFastestHost (живёт до перезагрузки Lampa).
+     *  При повторных вызовах: если в mirrors есть URL на кэш-хосте — возвращаем
+     *  его без гонки (экономит 100-500мс на каждой следующей серии/озвучке).
+     *
+     *  Таймаут гонки: 1500мс. Если никто не успел — фолбэк на fallbackUrl
+     *  (это последний mp4, как было в v1.0.60).
+     *
+     *  Используем fetch с method:'HEAD'. CORS не мешает — нам нужен только факт
+     *  быстрого ответа (network response timing). Даже при опаковке opaque-респонса
+     *  fetch исполнится, и мы поймём время.
+     *
+     *  cb(winnerUrl) — вызывается ровно один раз.
+     * ==================================================== */
+    function pickFastestMirror(mirrors, fallbackUrl, cb) {
+        var done = false;
+        function finish(url, reason) {
+            if (done) return;
+            done = true;
+            try { cb(url); } catch (e) {}
+            console.log('REZKA', 'mirror race finish:', reason, '->', (url || '').slice(0, 60));
+        }
+        try {
+            // Оставляем только mp4-варианты (HLS всё равно не играется в Lampa).
+            var candidates = (mirrors || []).filter(function (u) {
+                return u && u.indexOf(':hls:') === -1 && u.indexOf('.m3u8') === -1;
+            });
+            if (!candidates.length) { finish(fallbackUrl, 'no-mp4-mirrors'); return; }
+            if (candidates.length === 1) { finish(candidates[0], 'single-mirror'); return; }
+
+            // Проверяем кэш «самый быстрый хост».
+            var cachedHost = '';
+            try { cachedHost = String(window._rezkaFastestHost || ''); } catch (e) {}
+            if (cachedHost) {
+                for (var i = 0; i < candidates.length; i++) {
+                    var u = candidates[i];
+                    if (u.indexOf('://' + cachedHost + '/') !== -1 || u.indexOf('://' + cachedHost + ':') !== -1) {
+                        console.log('REZKA', 'mirror race: using cached fastest host', cachedHost);
+                        finish(u, 'cache-hit:' + cachedHost);
+                        return;
+                    }
+                }
+                console.log('REZKA', 'mirror race: cached host', cachedHost, 'not in candidates');
+            }
+
+            // Параллельные HEAD-запросы. Первый, кто ответил — победитель.
+            var TIMEOUT_MS = 1500;
+            var startTs = Date.now();
+            console.log('REZKA', 'mirror race: starting with', candidates.length, 'candidates');
+
+            // Таймаут — фолбэк на последний mp4 (так же как в v1.0.60).
+            setTimeout(function () {
+                if (!done) {
+                    console.log('REZKA', 'mirror race: timeout after', TIMEOUT_MS, 'ms');
+                    finish(fallbackUrl || candidates[candidates.length - 1], 'timeout');
+                }
+            }, TIMEOUT_MS);
+
+            candidates.forEach(function (url, idx) {
+                var t0 = Date.now();
+                // mode:'no-cors' — CDN обычно не отдаёт CORS заголовки. Нам важно
+                // только время ответа, не тело.
+                try {
+                    fetch(url, { method: 'HEAD', mode: 'no-cors', cache: 'no-store' })
+                        .then(function () {
+                            if (done) return;
+                            var dt = Date.now() - t0;
+                            // Пытаемся вытащить хост из url и запомнить на сессию.
+                            try {
+                                var winHost = '';
+                                try { winHost = new URL(url).hostname; } catch (eU) {
+                                    var hm = url.match(/^https?:\/\/([^\/]+)/);
+                                    winHost = hm ? hm[1] : '';
+                                }
+                                if (winHost) { window._rezkaFastestHost = winHost; }
+                                console.log('REZKA', 'mirror race: winner idx=' + idx, 'host=', winHost, 'rtt=', dt + 'ms');
+                            } catch (eL) {}
+                            finish(url, 'race-winner:idx' + idx + ':' + dt + 'ms');
+                        })
+                        .catch(function (e) {
+                            // Игнорируем отдельные ошибки — надеёмся, что хотя бы один ответит.
+                            // Если все рухнут — сработает таймаут выше.
+                            console.log('REZKA', 'mirror race: candidate', idx, 'failed:', e && e.message);
+                        });
+                } catch (eFetch) {
+                    console.log('REZKA', 'mirror race: fetch threw for', idx, eFetch && eFetch.message);
+                }
+            });
+        } catch (eAll) {
+            console.log('REZKA', 'mirror race: outer error', eAll && eAll.message);
+            finish(fallbackUrl, 'outer-error');
+        }
+    }
+
     function hardKillPreviousVideo() {
         try {
             var $videos = $('.player-video__video, .player video, body.player--viewing video');
@@ -3239,6 +3341,33 @@
      *  Поэтому подписываемся на ОБА источника.
      *  e = {name, url}, e.name — ярлык типа '1080p Ultra'/'720p'/'auto'.
      * ==================================================== */
+    /* ====================================================
+     *  registerMirrorErrorListener (v1.0.63)
+     *  Слушаем события ошибок плеера. Если выбранный «быстрый хост» рухнул
+     *  (видео не играется / ошибка загрузки) — сбрасываем кэш, чтобы
+     *  при следующем getStream запустилась новая гонка и мог выбраться другой хост.
+     * ==================================================== */
+    function registerMirrorErrorListener() {
+        if (window._rezkaMirrorErrorListenerRegistered) return;
+        try {
+            if (Lampa.Player && Lampa.Player.listener && Lampa.Player.listener.follow) {
+                Lampa.Player.listener.follow('error', function (e) {
+                    var prev = '';
+                    try { prev = String(window._rezkaFastestHost || ''); } catch (eR) {}
+                    if (prev) {
+                        console.log('REZKA', 'player error — reset cached fastest host (was ' + prev + ')');
+                        try { window._rezkaFastestHost = ''; } catch (eW) {}
+                    } else {
+                        console.log('REZKA', 'player error (no cached host to reset)');
+                    }
+                });
+            }
+            window._rezkaMirrorErrorListenerRegistered = true;
+        } catch (e) {
+            console.log('REZKA', 'registerMirrorErrorListener err:', e && e.message);
+        }
+    }
+
     function registerGlobalQualityListener() {
         if (window._rezkaQualityListenerRegistered) return;
         try {
@@ -3344,6 +3473,7 @@
             addOnlineSource();
             addCardButton();
             registerGlobalQualityListener();
+            registerMirrorErrorListener();
             // Авто-перелог: проверяем при старте и каждые 6 часов.
             setTimeout(maybeAutoRelogin, 5000);
             setInterval(maybeAutoRelogin, 6 * 60 * 60 * 1000);
