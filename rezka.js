@@ -21,7 +21,7 @@
      * ==================================================== */
     var manifest = {
         type: 'video',
-        version: '1.0.55',
+        version: '1.0.56',
         name: 'HDREZKA',
         description: 'Просмотр фильмов и сериалов с HDREZKA по личному аккаунту',
         component: 'rezka_online'
@@ -153,9 +153,18 @@
      * If proxy is empty AND we run in a CORS-restricted browser context,
      * we still try the direct URL — Lampa Android-APK bypasses CORS natively.
      */
+    function isWorkerProxy(p) {
+        if (!p) return false;
+        return /workers\.dev|\.vercel\.app|\.fly\.dev|\.onrender\.com/i.test(p) || /^worker:/i.test(p);
+    }
+
     function proxify(url) {
         var p = String(Lampa.Storage.get(STORAGE.proxy) || '').trim();
         if (!p) return url;
+        // v1.0.56: HDREZKA-worker используется только для логина (получить HttpOnly cookies
+        // в виде строки). Обычные запросы к HDREZKA идут напрямую — плагин уже сохранил
+        // куки в Storage, и native-стек Lampa добавит их в заголовок Cookie.
+        if (isWorkerProxy(p)) return url;
         // Lampac-style: <proxy>/<url>
         if (p.slice(-1) !== '/') p += '/';
         return p + url;
@@ -450,9 +459,9 @@
         tryDirect();
 
         function tryDirect() {
-        // Попытки: 1) прямой, 2) пользовательский прокси (если есть)
+        // Попытки: 1) прямой, 2) пользовательский CORS-прокси (если есть и это НЕ worker)
         var attempts = [''];
-        if (userProxy) {
+        if (userProxy && !isWorkerProxy(userProxy)) {
             attempts.push(userProxy.slice(-1) === '/' ? userProxy : userProxy + '/');
         }
 
