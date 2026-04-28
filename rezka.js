@@ -21,7 +21,7 @@
      * ==================================================== */
     var manifest = {
         type: 'video',
-        version: '1.0.67',
+        version: '1.0.68',
         name: 'HDREZKA',
         description: 'Просмотр фильмов и сериалов с HDREZKA по личному аккаунту',
         component: 'rezka_online'
@@ -61,6 +61,44 @@
             if (d === VPS_PROXY_DOMAINS[i]) return true;
         }
         return false;
+    }
+
+    /* v1.0.68: Список CDN-хостов, которые наш nginx белый-лист в location ~ ^/cdn/(...).
+       Обязательно синхронизировать с ним, иначе nginx ответит 404 и видео не заиграет. */
+    function isAllowedCdnHost(host) {
+        if (!host) return false;
+        host = String(host).toLowerCase();
+        if (host === 'stream.voidboost.cc' || host === 'laptostack.org') return true;
+        if (/^prx-[a-z0-9.-]+\.cdn\.org$/.test(host)) return true;
+        if (/^[a-z0-9.-]+\.voidboost\.cc$/.test(host)) return true;
+        if (/^[a-z0-9.-]+\.cdnjwplayer\.com$/.test(host)) return true;
+        return false;
+    }
+
+    /* v1.0.68: Переписывает прямую CDN-ссылку (https://laptostack.org/.../v.mp4)
+       на проксированный URL VPS: https://<vps>:8443/cdn/laptostack.org/.../v.mp4.
+       Используется только когда домен плагина — VPS-прокси. */
+    function rewriteCdnViaProxy(url) {
+        if (!url) return url;
+        var dom = getDomain();
+        if (!isVpsProxyDomain(dom)) return url;
+        try {
+            var m = String(url).match(/^(https?):\/\/([^\/:?#]+)(?::\d+)?(\/[^\s]*)?$/i);
+            if (!m) return url;
+            var host = m[2].toLowerCase();
+            var path = m[3] || '/';
+            // Если уже переписанный (во избежание двойного оборачивания).
+            if (host === dom.replace(/^https?:\/\//, '').replace(/:\d+$/, '').toLowerCase()) return url;
+            if (!isAllowedCdnHost(host)) {
+                console.log('REZKA', 'CDN rewrite skipped, host not whitelisted:', host);
+                return url;
+            }
+            // Сформировать URL прокси: <vps>/cdn/<host><path>
+            return dom.replace(/\/+$/, '') + '/cdn/' + host + path;
+        } catch (e) {
+            console.log('REZKA', 'rewriteCdnViaProxy error:', e && e.message);
+            return url;
+        }
     }
 
     /* v1.0.32: per-film хранилище качества и сезона.
@@ -1292,14 +1330,17 @@
             console.log('REZKA', 'mirror race finish:', reason, '->', (url || '').slice(0, 80));
         }
         try {
-            // v1.0.65: если весь трафик идёт через наш VPS-прокси — гонка бессмысленна:
-            // все mirror'ы ведут в одной и той же nginx-инстанции. Берём первый mp4.
+            // v1.0.68: если весь трафик идёт через наш VPS-прокси — берём первый mp4
+            // И ПЕРЕПИСЫВАЕМ его на /cdn/<host>/<path> — иначе видео пойдёт напрямую к CDN,
+            // мимо VPS и под троттлинг из ЮВА.
             if (isVpsProxyDomain(getDomain())) {
                 var firstMp4 = (mirrors || []).filter(function (u) {
                     return u && u.indexOf(':hls:') === -1 && u.indexOf('.m3u8') === -1;
                 })[0] || fallbackUrl;
-                console.log('REZKA', 'mirror race: skip (VPS proxy mode), using', (firstMp4 || '').slice(0, 80));
-                finish(firstMp4, 'vps-proxy-mode');
+                var rewritten = rewriteCdnViaProxy(firstMp4);
+                console.log('REZKA', 'mirror race: skip (VPS proxy mode); CDN rewrite:',
+                    (firstMp4 || '').slice(0, 60), '->', (rewritten || '').slice(0, 80));
+                finish(rewritten, 'vps-proxy-mode-cdn-rewrite');
                 return;
             }
             // Оставляем только mp4-варианты (HLS всё равно не играется в Lampa).
