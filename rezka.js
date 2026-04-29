@@ -21,7 +21,7 @@
      * ==================================================== */
     var manifest = {
         type: 'video',
-        version: '1.0.73',
+        version: '1.0.74',
         name: 'HDREZKA',
         description: 'Просмотр фильмов и сериалов с HDREZKA по личному аккаунту',
         component: 'rezka_online'
@@ -82,29 +82,11 @@
        Через 8444 ALPN отдаёт только http/1.1 — плеер счастлив.
        Управление страницами rezka остаётся на :8443 (там Lampa.Reguest /
        fetch — браузерный стек, который HTTP/2 жуёт нормально). */
-    var VPS_CDN_HTTPS_BASE = 'https://83-147-216-95.sslip.io:8444';
+    /* v1.0.74: ВРЕМЕННО ОТКЛЮЧЕНО проксирование CDN/видео — отдаём
+       плееру прямые ссылки. Страницы rezka по-прежнему идут через
+       VPS:8443. Вернём полное проксирование позже. */
     function rewriteCdnViaProxy(url) {
-        if (!url) return url;
-        var dom = getDomain();
-        if (!isVpsProxyDomain(dom)) return url;
-        try {
-            var m = String(url).match(/^(https?):\/\/([^\/:?#]+)(?::\d+)?(\/[^\s]*)?$/i);
-            if (!m) return url;
-            var host = m[2].toLowerCase();
-            var path = m[3] || '/';
-            // Если уже переписанный на наш входной домен / cdn-домен — не трогаем.
-            var inDom = dom.replace(/^https?:\/\//, '').replace(/:\d+$/, '').toLowerCase();
-            if (host === inDom) return url;
-            if (!isAllowedCdnHost(host)) {
-                console.log('REZKA', 'CDN rewrite skipped, host not whitelisted:', host);
-                return url;
-            }
-            // Видео идёт ВСЕГДА через VPS_CDN_HTTPS_BASE (порт 8444, HTTP/1.1).
-            return VPS_CDN_HTTPS_BASE + '/cdn/' + host + path;
-        } catch (e) {
-            console.log('REZKA', 'rewriteCdnViaProxy error:', e && e.message);
-            return url;
-        }
+        return url;
     }
 
     /* v1.0.32: per-film хранилище качества и сезона.
